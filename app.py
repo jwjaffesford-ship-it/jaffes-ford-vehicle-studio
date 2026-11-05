@@ -171,19 +171,19 @@ def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, to
     # rather than appearing as a large detached oval.
     ambient = Image.new("L", canvas.size, 0)
     ambient_draw = ImageDraw.Draw(ambient)
-    ambient_draw.line(points, fill=min(255, round(opacity * 0.4)),
+    ambient_draw.line(points, fill=min(255, round(opacity * 0.28)),
                       width=max(8, round(width * 0.055 * spread)))
     ambient = ambient.filter(ImageFilter.GaussianBlur(max(2, softness)))
 
     # More concentrated patches where the tyres meet the floor.
     contact = Image.new("L", canvas.size, 0)
     contact_draw = ImageDraw.Draw(contact)
-    radius_x = max(5, round(width * 0.055 * spread))
-    radius_y = max(3, round(width * 0.012 * spread))
+    radius_x = max(5, round(width * 0.046 * spread))
+    radius_y = max(3, round(width * 0.011 * spread))
     for x, y in points:
         contact_draw.ellipse((x - radius_x, y - radius_y, x + radius_x, y + radius_y),
-                             fill=min(255, round(opacity * 0.9)))
-    contact = contact.filter(ImageFilter.GaussianBlur(max(1, round(softness * 0.32))))
+                             fill=min(255, round(opacity * 1.25)))
+    contact = contact.filter(ImageFilter.GaussianBlur(max(1, round(softness * 0.25))))
 
     # Alpha composite the dark layers against the original untouched showroom.
     for mask in (ambient, contact):
@@ -400,6 +400,15 @@ def draw_shadow_points(image: Image.Image, points) -> Image.Image:
     return overlay
 
 
+def apply_front_30_shadow_preset():
+    """A tested starting point for this Ranger 30-degree reference, not final QA."""
+    st.session_state["tyre_front_pos"] = 53
+    st.session_state["tyre_rear_pos"] = 93
+    st.session_state["tyre_front_y"] = 0
+    st.session_state["tyre_rear_y"] = 6
+    st.session_state["shadow_marker_preview"] = True
+
+
 def snap_roofline(new_fine_y: int):
     """Streamlit button callback, runs before widgets are instantiated."""
     st.session_state["fine_y_slider"] = new_fine_y
@@ -434,7 +443,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.6 · One-click roofline correction and adjustable tyre-shadow contacts")
+st.caption("Prototype 1.7 · Better tyre contact shadows and 30-degree positioning preset")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -490,11 +499,17 @@ with st.sidebar:
     spread = st.slider("Shadow width", 0.5, 1.5, 0.85, 0.05)
     with st.expander("Tyre contact positions (optional)"):
         st.caption("Move the two contact points if a shadow misses a tyre.")
-        left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50)
-        right_tyre_pct = st.slider("Right tyre position (% of cut-out width)", 5, 95, 87)
-        left_tyre_y = st.slider("Tyre 1 shadow vertical offset (pixels)", -50, 50, 0, 1)
-        right_tyre_y = st.slider("Tyre 2 shadow vertical offset (pixels)", -50, 50, 0, 1)
-        show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False)
+        left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50, key="tyre_front_pos")
+        right_tyre_pct = st.slider("Right tyre position (% of cut-out width)", 5, 95, 87, key="tyre_rear_pos")
+        left_tyre_y = st.slider("Tyre 1 shadow vertical offset (pixels)", -50, 50, 0, 1, key="tyre_front_y")
+        right_tyre_y = st.slider("Tyre 2 shadow vertical offset (pixels)", -50, 50, 0, 1, key="tyre_rear_y")
+        show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False, key="shadow_marker_preview")
+        if angle_label == "Front 30° — view 2":
+            st.button(
+                "Apply Ranger 30° shadow starting points",
+                on_click=apply_front_30_shadow_preset,
+                help="Based on the front and rear wheel positions in the tested grey Ranger image. Fine-tune for other vehicles.",
+            )
     st.header("5 · Preview")
     show_crop = st.checkbox("Show centred 4:5 crop guide in preview", value=False)
 
@@ -672,7 +687,18 @@ if "30°" in angle_label:
         and vehicle_box[1] >= safe_top and vehicle_box[3] <= safe_bottom
     )
     if crop_fit:
-        st.success("The vehicle fits the detected template crop boundary (or generic 4:5 boundary when unavailable). Inspect mirrors and edges.")
+        left_margin = vehicle_box[0] - safe_left
+        right_margin = safe_right - vehicle_box[2]
+        top_margin = vehicle_box[1] - safe_top
+        bottom_margin = safe_bottom - vehicle_box[3]
+        margin = min(left_margin, right_margin, top_margin, bottom_margin)
+        if margin < (safe_right - safe_left) * 0.015:
+            st.warning(
+                "The whole vehicle is inside the crop guide, but it is very close to an edge. "
+                "Consider reducing the fine size adjustment slightly to leave a safe margin."
+            )
+        else:
+            st.success("The vehicle is inside the detected 4:5 guide with some clearance.")
     else:
         st.warning("The vehicle extends outside the template crop boundary (or generic 4:5 boundary when unavailable). Adjust size or position.")
 
