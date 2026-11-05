@@ -26,20 +26,41 @@ def load_png(data: bytes) -> bytes:
         return out.getvalue()
 
 
-@st.cache_resource(show_spinner=False)
-def background_removal_session():
+@st.cache_resource(show_spinner=False, max_entries=1)
+def background_removal_session(model_name: str):
     from rembg import new_session
-    return new_session("u2netp")
+    return new_session(model_name)
 
 
-@st.cache_data(show_spinner=False, max_entries=10)
-def generate_cutout(image_bytes: bytes) -> bytes:
+@st.cache_data(show_spinner=False, max_entries=5)
+def generate_cutout(image_bytes: bytes, model_name: str) -> bytes:
     from rembg import remove
-    result = remove(image_bytes, session=background_removal_session())
+    # Rembg's built-in mask post-processing reduces noise and stray islands.
+    result = remove(
+        image_bytes,
+        session=background_removal_session(model_name),
+        post_process_mask=True,
+    )
     with Image.open(io.BytesIO(result)) as image:
         out = io.BytesIO()
         image.convert("RGBA").save(out, format="PNG")
         return out.getvalue()
+
+
+def refine_cutout(image: Image.Image, cleanup: int) -> Image.Image:
+    """Remove weakly selected background haze while preserving vehicle RGB pixels.
+
+    The slider does not regenerate or recolor the vehicle: it changes only alpha.
+    Strong cleanup may erase genuine dark or translucent details, so review edges.
+    """
+    if cleanup <= 0:
+        return image
+    result = image.copy()
+    alpha = np.asarray(image.getchannel("A"), dtype=np.float32)
+    threshold = min(190, round(cleanup * 1.8))
+    alpha = np.clip((alpha - threshold) * (255.0 / (255 - threshold)), 0, 255)
+    result.putalpha(Image.fromarray(alpha.astype(np.uint8), mode="L"))
+    return result
 
 
 def parse_image(png_bytes: bytes) -> Image.Image:
@@ -151,7 +172,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.1 · Vehicle cut-out, grounded tyre shadows and full-size export")
+st.caption("Prototype 1.2 · Refined background masking, tyre contact shadows and full-size export")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -160,14 +181,29 @@ with st.sidebar:
     vehicle_upload = st.file_uploader("Original vehicle photograph", type=["png", "jpg", "jpeg"], key="vehicle")
     remove_background = st.checkbox("Remove vehicle photo background automatically", value=True,
                                     help="Uncheck when uploading a vehicle PNG that is already transparent.")
+    if remove_background:
+        model_choice = st.selectbox(
+            "Background-removal quality",
+            ("Standard (faster)", "Detailed (more accurate, uses more memory)"),
+            index=0,
+            help="Try Detailed if the standard cut-out leaves pieces of the original scenery. The detailed model may exceed free hosting resources.",
+        )
+        cleanup = st.slider(
+            "Remove background haze",
+            min_value=0, max_value=90, value=35, step=5,
+            help="Higher values remove faint unwanted pixels, but may also trim thin or translucent vehicle details. Review roof, mirrors, tyres and glass.",
+        )
+    else:
+        model_choice = "Standard (faster)"
+        cleanup = 0
     st.header("2 · Position vehicle")
     size_pct = st.slider("Vehicle width (% of showroom width)", 10, 105, 65)
     x_pct = st.slider("Horizontal centre (%)", 0, 100, 50)
     ground_pct = st.slider("Ground contact height (%)", 25, 100, 83)
     st.header("3 · Floor shadow")
-    opacity = st.slider("Shadow strength", 0, 220, 115)
-    softness = st.slider("Shadow softness (pixels)", 0, 90, 24)
-    spread = st.slider("Shadow width", 0.5, 1.5, 1.0, 0.05)
+    opacity = st.slider("Shadow strength", 0, 220, 80)
+    softness = st.slider("Shadow softness (pixels)", 0, 90, 18)
+    spread = st.slider("Shadow width", 0.5, 1.5, 0.85, 0.05)
     with st.expander("Tyre contact positions (optional)"):
         st.caption("Move the two contact points if a shadow misses a tyre.")
         left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50)
@@ -188,7 +224,8 @@ original_vehicle = parse_image(vehicle_bytes)
 if remove_background:
     try:
         with st.spinner("Removing the original background from the vehicle photo..."):
-            vehicle = parse_image(generate_cutout(vehicle_bytes))
+            selected_model = "isnet-general-use" if model_choice.startswith("Detailed") else "u2netp"
+            vehicle = refine_cutout(parse_image(generate_cutout(vehicle_bytes, selected_model)), cleanup)
     except Exception as ex:
         st.error("Automatic cut-out failed. Please retry or upload a transparent PNG vehicle image.")
         with st.expander("Technical details"):
@@ -210,7 +247,7 @@ left_col, right_col = st.columns([1, 2])
 with left_col:
     st.subheader("Vehicle cut-out")
     st.image(vehicle, use_container_width=True)
-    st.caption("Review mirrors, wheels, glass and other fine edges. Automatic masking may need manual correction.")
+    st.caption("Review above the roof, mirrors, wheel edges and any remaining source floor. Increase 'Remove background haze' or select the Detailed model if needed.")
 with right_col:
     st.subheader("Showroom composite")
     st.image(crop_guide(final) if show_crop else final, use_container_width=True)
