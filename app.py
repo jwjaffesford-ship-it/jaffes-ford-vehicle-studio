@@ -183,14 +183,15 @@ def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, to
 
 def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            x_pct: int, ground_pct: int, opacity: int, softness: int, spread: float,
-           left_tyre_pct: int, right_tyre_pct: int):
+           left_tyre_pct: int, right_tyre_pct: int,
+           fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
-    target_width = max(1, round(bw * size_pct / 100))
+    target_width = max(1, round(bw * size_pct / 100 * fine_scale))
     target_height = max(1, round(target_width * vehicle.height / vehicle.width))
     vehicle = vehicle.resize((target_width, target_height), Image.Resampling.LANCZOS)
-    left = round(bw * x_pct / 100 - target_width / 2)
-    top = round(bh * ground_pct / 100 - target_height)
+    left = round(bw * x_pct / 100 - target_width / 2) + fine_x
+    top = round(bh * ground_pct / 100 - target_height) + fine_y
 
     composited = background.copy().convert("RGBA")
     composited = draw_contact_shadow(
@@ -361,6 +362,26 @@ def apply_suggested_placement(suggestion):
     st.session_state["vehicle_width_slider"] = suggestion[0]
     st.session_state["vehicle_center_slider"] = suggestion[1]
     st.session_state["vehicle_ground_slider"] = suggestion[2]
+    # Reset previous fine-tuning when applying a fresh reference suggestion.
+    st.session_state["fine_x_slider"] = 0
+    st.session_state["fine_y_slider"] = 0
+    st.session_state["fine_scale_slider"] = 100.0
+
+
+def draw_detected_guides(image: Image.Image, safe_box, roof_y) -> Image.Image:
+    """Show the actual detected template roof and crop guides, preview only."""
+    preview = image.copy().convert("RGBA")
+    draw = ImageDraw.Draw(preview)
+    w, h = preview.size
+    line_width = max(2, round(w / 750))
+    if safe_box is not None:
+        x0, y0, x1, y1 = safe_box
+        draw.rectangle((x0, y0, x1, y1), outline=(235, 40, 40, 255), width=line_width)
+    if roof_y is not None:
+        dash = max(8, round(w * 0.016))
+        for x in range(0, w, dash * 2):
+            draw.line((x, roof_y, min(w - 1, x + dash), roof_y), fill=(235, 40, 40, 255), width=line_width)
+    return preview
 
 
 def crop_guide(image: Image.Image) -> Image.Image:
@@ -376,7 +397,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.4 · Suggested template placement, masking, shadows and clean 200-dpi export")
+st.caption("Prototype 1.5 · Template roofline guides and precise positioning controls")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -412,11 +433,20 @@ with st.sidebar:
     )
     show_template = st.checkbox("Ghost reference over preview", value=True)
     template_opacity = st.slider("Reference visibility (%)", 10, 80, 40, 5)
-    st.caption("These references help manual matching. This version does not yet auto-align the vehicle.")
+    show_template_guides = st.checkbox(
+        "Show roofline and crop guides (without ghost vehicle)", value=True,
+        help="These guides are detected from the uploaded Ford angle template and appear only in the preview.",
+    )
+    st.caption("The reference can suggest placement, but final fit must still be checked.")
     st.header("3 · Position vehicle")
     size_pct = st.slider("Vehicle width (% of showroom width)", 10, 105, 65, key="vehicle_width_slider")
     x_pct = st.slider("Horizontal centre (%)", 0, 100, 50, key="vehicle_center_slider")
     ground_pct = st.slider("Ground contact height (%)", 25, 100, 83, key="vehicle_ground_slider")
+    with st.expander("Fine positioning (pixels)"):
+        st.caption("Make small adjustments after applying the suggested placement. Zero means no fine adjustment.")
+        fine_x = st.slider("Fine horizontal shift (pixels)", -100, 100, 0, 1, key="fine_x_slider")
+        fine_y = st.slider("Fine vertical shift (pixels)", -100, 100, 0, 1, key="fine_y_slider")
+        fine_scale_pct = st.slider("Fine size adjustment (%)", 90.0, 110.0, 100.0, 0.1, key="fine_scale_slider")
     st.header("4 · Floor shadow")
     opacity = st.slider("Shadow strength", 0, 220, 80)
     softness = st.slider("Shadow softness (pixels)", 0, 90, 18)
@@ -455,7 +485,8 @@ else:
 
 try:
     final, fits, vehicle_box = render(background, vehicle, size_pct, x_pct, ground_pct,
-                         opacity, softness, spread, left_tyre_pct, right_tyre_pct)
+                         opacity, softness, spread, left_tyre_pct, right_tyre_pct,
+                         fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
 except ValueError as ex:
     st.error(str(ex))
     st.stop()
@@ -480,10 +511,32 @@ with right_col:
     preview = crop_guide(final) if show_crop else final
     if reference is not None and show_template:
         preview = preview_with_template(preview, reference, template_opacity)
+    if reference is not None and show_template_guides:
+        detected_safe_box, detected_roof_line = estimate_template_guides(
+            template_bytes, background.width, background.height
+        )
+        preview = draw_detected_guides(preview, detected_safe_box, detected_roof_line)
     st.image(preview, use_container_width=True)
     st.caption("Reference/template and red crop guides are preview-only. They are NEVER included in the final download.")
 
 if reference is not None:
+    guide_box_for_check, roof_line_for_check = estimate_template_guides(
+        template_bytes, background.width, background.height
+    )
+    if roof_line_for_check is not None:
+        roof_gap_px = vehicle_box[1] - roof_line_for_check
+        if abs(roof_gap_px) <= 2:
+            st.success("Roofline alignment: within 2 pixels of the template guide.")
+        elif roof_gap_px > 0:
+            st.info(
+                f"The top of the vehicle is about {roof_gap_px} pixels BELOW the roof-level guide. "
+                "Adjust Fine vertical shift to a negative value to raise it."
+            )
+        else:
+            st.warning(
+                f"The top of the vehicle is about {-roof_gap_px} pixels ABOVE the roof-level guide. "
+                "Adjust Fine vertical shift to a positive value to lower it."
+            )
     with st.expander("One-click placement suggestion", expanded=True):
         try:
             with st.spinner("Comparing the angle reference with the empty showroom..."):
@@ -556,4 +609,4 @@ st.download_button("Download full-size PNG · 200 dpi", output.getvalue(),
                    file_name="Jaffes_Ford_vehicle_composite_200dpi.png", mime="image/png")
 st.caption(f"Export size: {background.width} × {background.height} pixels. The original showroom pixel dimensions are preserved.")
 st.divider()
-st.markdown("**Next upgrades:** persistent locked references, stronger alignment verification, exact crop-safe enforcement, improved tyre grounding and batch downloads.")
+st.markdown("**Next upgrades:** locked showroom and template references, more reliable model-specific automatic alignment, precise tyre-ground contact and batch downloads.")
