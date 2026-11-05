@@ -137,9 +137,23 @@ def find_tyre_bottom(alpha: np.ndarray, fraction: float) -> int:
     return int(np.percentile(bottoms, 80)) if bottoms else round(height * 0.9)
 
 
+def tyre_shadow_points(vehicle: Image.Image, left: int, top: int,
+                       tyre_fractions: tuple[float, float],
+                       tyre_y_offsets: tuple[int, int]):
+    """Return the two estimated tyre/floor contact points on the final canvas."""
+    alpha = np.asarray(vehicle.getchannel("A"))
+    points = []
+    for fraction, y_offset in zip(tyre_fractions, tyre_y_offsets):
+        x = left + round((vehicle.width - 1) * fraction)
+        y = top + find_tyre_bottom(alpha, fraction) + y_offset
+        points.append((x, y))
+    return points
+
+
 def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, top: int,
                         opacity: int, softness: int, spread: float,
-                        left_tyre_frac: float, right_tyre_frac: float) -> Image.Image:
+                        left_tyre_frac: float, right_tyre_frac: float,
+                        left_tyre_y: int, right_tyre_y: int) -> Image.Image:
     """Use two independently grounded tyre shadows and a restrained ambient shadow.
 
     This is a photographic approximation: tyre centres can be adjusted in the UI.
@@ -148,12 +162,10 @@ def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, to
     if opacity <= 0:
         return canvas
     width, height = vehicle.size
-    alpha = np.asarray(vehicle.getchannel("A"))
-    points = []
-    for frac in (left_tyre_frac, right_tyre_frac):
-        x = left + round((width - 1) * frac)
-        y = top + find_tyre_bottom(alpha, frac)
-        points.append((x, y))
+    points = tyre_shadow_points(
+        vehicle, left, top, (left_tyre_frac, right_tyre_frac),
+        (left_tyre_y, right_tyre_y),
+    )
 
     # Faint shadow beneath the chassis. It follows the line between the tyres
     # rather than appearing as a large detached oval.
@@ -184,6 +196,7 @@ def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, to
 def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            x_pct: int, ground_pct: int, opacity: int, softness: int, spread: float,
            left_tyre_pct: int, right_tyre_pct: int,
+           left_tyre_y: int = 0, right_tyre_y: int = 0,
            fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
@@ -196,14 +209,20 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
     composited = background.copy().convert("RGBA")
     composited = draw_contact_shadow(
         composited, vehicle, left, top, opacity, softness, spread,
-        left_tyre_pct / 100, right_tyre_pct / 100
+        left_tyre_pct / 100, right_tyre_pct / 100,
+        left_tyre_y, right_tyre_y
     )
     # Put original vehicle pixels above the shadows; preserve translucent edges.
     vehicle_layer = Image.new("RGBA", composited.size, (0, 0, 0, 0))
     vehicle_layer.paste(vehicle, (left, top))
     composited = Image.alpha_composite(composited, vehicle_layer)
     fits = (left >= 0 and top >= 0 and left + target_width <= bw and top + target_height <= bh)
-    return composited, fits, (left, top, left + target_width, top + target_height)
+    return composited, fits, (left, top, left + target_width, top + target_height), tuple(
+        tyre_shadow_points(
+            vehicle, left, top, (left_tyre_pct / 100, right_tyre_pct / 100),
+            (left_tyre_y, right_tyre_y),
+        )
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=6)
@@ -368,6 +387,24 @@ def apply_suggested_placement(suggestion):
     st.session_state["fine_scale_slider"] = 100.0
 
 
+def draw_shadow_points(image: Image.Image, points) -> Image.Image:
+    """Preview only: display exact coordinates where shadow anchor patches are placed."""
+    overlay = image.copy().convert("RGBA")
+    draw = ImageDraw.Draw(overlay)
+    radius = max(5, round(image.width / 250))
+    for i, (x, y) in enumerate(points, start=1):
+        draw.ellipse((x-radius, y-radius, x+radius, y+radius),
+                     fill=(255, 200, 0, 215), outline=(0, 0, 0, 255), width=2)
+        draw.text((x+radius+3, y-radius-3), f"Tyre {i}", fill=(0, 0, 0, 255),
+                  stroke_width=2, stroke_fill=(255, 255, 255, 255))
+    return overlay
+
+
+def snap_roofline(new_fine_y: int):
+    """Streamlit button callback, runs before widgets are instantiated."""
+    st.session_state["fine_y_slider"] = new_fine_y
+
+
 def draw_detected_guides(image: Image.Image, safe_box, roof_y) -> Image.Image:
     """Show the actual detected template roof and crop guides, preview only."""
     preview = image.copy().convert("RGBA")
@@ -397,7 +434,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.5 · Template roofline guides and precise positioning controls")
+st.caption("Prototype 1.6 · One-click roofline correction and adjustable tyre-shadow contacts")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -455,6 +492,9 @@ with st.sidebar:
         st.caption("Move the two contact points if a shadow misses a tyre.")
         left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50)
         right_tyre_pct = st.slider("Right tyre position (% of cut-out width)", 5, 95, 87)
+        left_tyre_y = st.slider("Tyre 1 shadow vertical offset (pixels)", -50, 50, 0, 1)
+        right_tyre_y = st.slider("Tyre 2 shadow vertical offset (pixels)", -50, 50, 0, 1)
+        show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False)
     st.header("5 · Preview")
     show_crop = st.checkbox("Show centred 4:5 crop guide in preview", value=False)
 
@@ -484,8 +524,9 @@ else:
         st.warning("Your image has no transparent pixels. Use automatic background removal, or upload an already cut-out PNG.")
 
 try:
-    final, fits, vehicle_box = render(background, vehicle, size_pct, x_pct, ground_pct,
+    final, fits, vehicle_box, shadow_points = render(background, vehicle, size_pct, x_pct, ground_pct,
                          opacity, softness, spread, left_tyre_pct, right_tyre_pct,
+                         left_tyre_y, right_tyre_y,
                          fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
 except ValueError as ex:
     st.error(str(ex))
@@ -516,6 +557,8 @@ with right_col:
             template_bytes, background.width, background.height
         )
         preview = draw_detected_guides(preview, detected_safe_box, detected_roof_line)
+    if show_shadow_points:
+        preview = draw_shadow_points(preview, shadow_points)
     st.image(preview, use_container_width=True)
     st.caption("Reference/template and red crop guides are preview-only. They are NEVER included in the final download.")
 
@@ -529,13 +572,46 @@ if reference is not None:
             st.success("Roofline alignment: within 2 pixels of the template guide.")
         elif roof_gap_px > 0:
             st.info(
-                f"The top of the vehicle is about {roof_gap_px} pixels BELOW the roof-level guide. "
-                "Adjust Fine vertical shift to a negative value to raise it."
+                f"The top of the vehicle is about {roof_gap_px} pixels BELOW the roof-level guide."
             )
         else:
             st.warning(
-                f"The top of the vehicle is about {-roof_gap_px} pixels ABOVE the roof-level guide. "
-                "Adjust Fine vertical shift to a positive value to lower it."
+                f"The top of the vehicle is about {-roof_gap_px} pixels ABOVE the roof-level guide."
+            )
+        target_fine_y = fine_y - roof_gap_px
+        # Moving the vehicle must not violate the template 4:5 crop-safe area.
+        within_fine_slider = -100 <= target_fine_y <= 100
+        moved_box = (
+            vehicle_box[0], vehicle_box[1] - roof_gap_px,
+            vehicle_box[2], vehicle_box[3] - roof_gap_px,
+        )
+        if "30°" in angle_label:
+            if guide_box_for_check is not None:
+                sx0, sy0, sx1, sy1 = guide_box_for_check
+            else:
+                swidth = min(background.width, round(background.height * 4 / 5))
+                sx0 = (background.width - swidth) // 2
+                sy0 = 0
+                sx1 = sx0 + swidth
+                sy1 = background.height
+        else:
+            sx0, sy0, sx1, sy1 = 0, 0, background.width, background.height
+        crop_safe = (
+            moved_box[0] >= sx0 and moved_box[2] <= sx1
+            and moved_box[1] >= sy0 and moved_box[3] <= sy1
+        )
+        if within_fine_slider and crop_safe and abs(roof_gap_px) > 2:
+            st.button(
+                f"Snap vehicle to roofline ({roof_gap_px:+d} px correction)",
+                on_click=snap_roofline,
+                args=(target_fine_y,),
+                type="primary",
+                help="Moves the original vehicle vertically without scaling, rotating or altering it.",
+            )
+        elif abs(roof_gap_px) > 2:
+            st.caption(
+                "Automatic roofline snap is unavailable because it would cross the crop boundary "
+                "or exceed the fine-position range. Adjust vehicle size or position first."
             )
     with st.expander("One-click placement suggestion", expanded=True):
         try:
@@ -609,4 +685,4 @@ st.download_button("Download full-size PNG · 200 dpi", output.getvalue(),
                    file_name="Jaffes_Ford_vehicle_composite_200dpi.png", mime="image/png")
 st.caption(f"Export size: {background.width} × {background.height} pixels. The original showroom pixel dimensions are preserved.")
 st.divider()
-st.markdown("**Next upgrades:** locked showroom and template references, more reliable model-specific automatic alignment, precise tyre-ground contact and batch downloads.")
+st.markdown("**Next upgrades:** locked showroom and template references, model-specific alignment presets, manual mask touch-up and batch downloads.")
