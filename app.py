@@ -409,6 +409,64 @@ def apply_front_30_shadow_preset():
     st.session_state["shadow_marker_preview"] = True
 
 
+def apply_crop_safe_settings(new_size_pct: int, new_x_pct: int, new_ground_pct: int,
+                             new_scale: float, new_fine_x: int, new_fine_y: int):
+    """Apply a safe-fit adjustment before the related Streamlit sliders are created."""
+    st.session_state["vehicle_width_slider"] = new_size_pct
+    st.session_state["vehicle_center_slider"] = new_x_pct
+    st.session_state["vehicle_ground_slider"] = new_ground_pct
+    st.session_state["fine_scale_slider"] = new_scale
+    st.session_state["fine_x_slider"] = new_fine_x
+    st.session_state["fine_y_slider"] = new_fine_y
+
+
+def crop_safe_settings(background, vehicle_box, safe_box, roof_y,
+                       size_pct, x_pct, fine_scale_pct):
+    """Compute a conservative non-distorting 4:5 fit, using exact slider math.
+
+    Maintain the roof guide whenever it can be reached without crossing the crop.
+    If it cannot, prefer full crop containment. Nothing is applied automatically.
+    """
+    import math
+    bw, bh = background.size
+    sx0, sy0, sx1, sy1 = safe_box
+    pad_x = max(6, round((sx1 - sx0) * 0.025))
+    pad_y = max(6, round((sy1 - sy0) * 0.018))
+    target_top = roof_y if roof_y is not None else vehicle_box[1]
+    target_top = max(sy0 + pad_y, target_top)
+    vw = vehicle_box[2] - vehicle_box[0]
+    vh = vehicle_box[3] - vehicle_box[1]
+    avail_w = sx1 - sx0 - 2 * pad_x
+    avail_h = sy1 - pad_y - target_top
+    if avail_w <= 0 or avail_h <= 0:
+        return None
+    factor = min(1.0, avail_w / max(1, vw), avail_h / max(1, vh))
+    # Small guard accounts for rounding slider values back to image pixels.
+    factor *= 0.996
+    target_fine_scale = fine_scale_pct * factor
+    new_size_pct = size_pct
+    if target_fine_scale < 90.0:
+        new_size_pct = max(10, math.floor(size_pct * factor))
+        target_fine_scale = size_pct * fine_scale_pct * factor / new_size_pct
+    new_scale = max(90.0, min(110.0, math.floor(target_fine_scale * 10) / 10))
+    new_w = max(1, round(bw * new_size_pct / 100 * new_scale / 100))
+    new_h = max(1, round(new_w * vh / max(1, vw)))
+    if new_w > avail_w or new_h > avail_h:
+        return None
+
+    # Retain the current horizontal centre where possible, then clamp to safe edges.
+    current_cx = (vehicle_box[0] + vehicle_box[2]) / 2
+    cx = min(sx1 - pad_x - new_w / 2, max(sx0 + pad_x + new_w / 2, current_cx))
+    new_x_pct = max(0, min(100, round(cx * 100 / bw)))
+    new_fine_x = round(cx - bw * new_x_pct / 100)
+    new_ground_pct = max(25, min(100, round((target_top + new_h) * 100 / bh)))
+    new_fine_y = target_top - round(bh * new_ground_pct / 100 - new_h)
+    if not (-100 <= new_fine_x <= 100 and -100 <= new_fine_y <= 100):
+        return None
+    return (new_size_pct, new_x_pct, new_ground_pct,
+            new_scale, new_fine_x, new_fine_y)
+
+
 def snap_roofline(new_fine_y: int):
     """Streamlit button callback, runs before widgets are instantiated."""
     st.session_state["fine_y_slider"] = new_fine_y
@@ -443,7 +501,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.7 · Better tyre contact shadows and 30-degree positioning preset")
+st.caption("Prototype 1.8 · Safer 4:5 crop fitting, roofline alignment and tyre-contact shadows")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -671,9 +729,11 @@ else:
 if "30°" in angle_label:
     width, height = background.size
     if reference is not None:
-        selected_guide, _ = estimate_template_guides(template_bytes, width, height)
+        selected_guide, selected_roof = estimate_template_guides(
+            template_bytes, width, height
+        )
     else:
-        selected_guide = None
+        selected_guide, selected_roof = None, None
     if selected_guide is None:
         safe_width = min(width, round(height * 4 / 5))
         safe_left = (width - safe_width) // 2
@@ -682,25 +742,50 @@ if "30°" in angle_label:
         safe_bottom = height
     else:
         safe_left, safe_top, safe_right, safe_bottom = selected_guide
+
+    padding_x = max(6, round((safe_right - safe_left) * 0.025))
+    padding_y = max(6, round((safe_bottom - safe_top) * 0.018))
     crop_fit = (
         vehicle_box[0] >= safe_left and vehicle_box[2] <= safe_right
         and vehicle_box[1] >= safe_top and vehicle_box[3] <= safe_bottom
     )
-    if crop_fit:
-        left_margin = vehicle_box[0] - safe_left
-        right_margin = safe_right - vehicle_box[2]
-        top_margin = vehicle_box[1] - safe_top
-        bottom_margin = safe_bottom - vehicle_box[3]
-        margin = min(left_margin, right_margin, top_margin, bottom_margin)
-        if margin < (safe_right - safe_left) * 0.015:
-            st.warning(
-                "The whole vehicle is inside the crop guide, but it is very close to an edge. "
-                "Consider reducing the fine size adjustment slightly to leave a safe margin."
+    padded_fit = (
+        vehicle_box[0] >= safe_left + padding_x
+        and vehicle_box[2] <= safe_right - padding_x
+        and vehicle_box[1] >= safe_top + padding_y
+        and vehicle_box[3] <= safe_bottom - padding_y
+    )
+    if padded_fit:
+        st.success("Vehicle inside the detected 4:5 crop guide with a 2.5% side safety margin.")
+    elif crop_fit:
+        st.warning(
+            "The entire vehicle fits within the 4:5 crop area, but the mirrors or bodywork "
+            "are close to the edges. A small safety margin is recommended."
+        )
+    else:
+        st.warning(
+            "Some of the vehicle extends beyond the detected 4:5 crop area. "
+            "Adjust the size or position before using this image."
+        )
+    if not padded_fit:
+        safe_settings = crop_safe_settings(
+            background, vehicle_box,
+            (safe_left, safe_top, safe_right, safe_bottom),
+            selected_roof, size_pct, x_pct, fine_scale_pct,
+        )
+        if safe_settings is not None:
+            st.button(
+                "Fit vehicle inside 4:5 crop with safe margins",
+                on_click=apply_crop_safe_settings,
+                args=safe_settings,
+                type="primary",
+                help="Reduces size proportionally and adjusts position to preserve the roofline where possible. Does not alter the vehicle image or background.",
             )
         else:
-            st.success("The vehicle is inside the detected 4:5 guide with some clearance.")
-    else:
-        st.warning("The vehicle extends outside the template crop boundary (or generic 4:5 boundary when unavailable). Adjust size or position.")
+            st.caption(
+                "Automatic safe-fit is unavailable for the current constraints. "
+                "Reduce vehicle width slightly or adjust the position sliders."
+            )
 
 if not fits:
     st.warning("Part of the vehicle is outside the showroom image. Adjust its size or position before exporting.")
