@@ -54,27 +54,69 @@ def crop_to_alpha(image: Image.Image) -> Image.Image:
     return image.crop(bbox)
 
 
-def draw_contact_shadow(canvas: Image.Image, left: int, top: int, width: int, height: int,
-                        opacity: int, softness: int, spread: float) -> Image.Image:
+def find_tyre_bottom(alpha: np.ndarray, fraction: float) -> int:
+    """Estimate the lower outline near a chosen wheel, in cut-out pixels."""
+    height, width = alpha.shape
+    centre = min(width - 1, max(0, round((width - 1) * fraction)))
+    radius = max(3, round(width * 0.035))
+    region = alpha[:, max(0, centre - radius): min(width, centre + radius + 1)]
+    # Sampling the bottommost opaque point in each column is more reliable
+    # than finding the lowest alpha pixel anywhere (which can be stray noise).
+    bottoms = []
+    for col in range(region.shape[1]):
+        positions = np.flatnonzero(region[:, col] > 140)
+        if positions.size:
+            bottoms.append(int(positions[-1]))
+    return int(np.percentile(bottoms, 80)) if bottoms else round(height * 0.9)
+
+
+def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, top: int,
+                        opacity: int, softness: int, spread: float,
+                        left_tyre_frac: float, right_tyre_frac: float) -> Image.Image:
+    """Use two independently grounded tyre shadows and a restrained ambient shadow.
+
+    This is a photographic approximation: tyre centres can be adjusted in the UI.
+    Shadow is applied *behind* vehicle pixels; the vehicle itself is not altered.
+    """
     if opacity <= 0:
         return canvas
-    # This is a photographic approximation, not a physics-based ray tracer.
-    shadow = Image.new("L", canvas.size, 0)
-    draw = ImageDraw.Draw(shadow)
-    feet = top + height
-    half_w = max(10, int(width * 0.46 * spread))
-    half_h = max(5, int(width * 0.052 * spread))
-    mid = left + width // 2
-    y = feet - max(2, int(height * 0.018))
-    draw.ellipse((mid - half_w, y - half_h, mid + half_w, y + half_h), fill=opacity)
-    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(0, int(softness))))
-    shading = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    shading.putalpha(shadow)
-    return Image.alpha_composite(canvas, shading)
+    width, height = vehicle.size
+    alpha = np.asarray(vehicle.getchannel("A"))
+    points = []
+    for frac in (left_tyre_frac, right_tyre_frac):
+        x = left + round((width - 1) * frac)
+        y = top + find_tyre_bottom(alpha, frac)
+        points.append((x, y))
+
+    # Faint shadow beneath the chassis. It follows the line between the tyres
+    # rather than appearing as a large detached oval.
+    ambient = Image.new("L", canvas.size, 0)
+    ambient_draw = ImageDraw.Draw(ambient)
+    ambient_draw.line(points, fill=min(255, round(opacity * 0.4)),
+                      width=max(8, round(width * 0.055 * spread)))
+    ambient = ambient.filter(ImageFilter.GaussianBlur(max(2, softness)))
+
+    # More concentrated patches where the tyres meet the floor.
+    contact = Image.new("L", canvas.size, 0)
+    contact_draw = ImageDraw.Draw(contact)
+    radius_x = max(5, round(width * 0.055 * spread))
+    radius_y = max(3, round(width * 0.012 * spread))
+    for x, y in points:
+        contact_draw.ellipse((x - radius_x, y - radius_y, x + radius_x, y + radius_y),
+                             fill=min(255, round(opacity * 0.9)))
+    contact = contact.filter(ImageFilter.GaussianBlur(max(1, round(softness * 0.32))))
+
+    # Alpha composite the dark layers against the original untouched showroom.
+    for mask in (ambient, contact):
+        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        layer.putalpha(mask)
+        canvas = Image.alpha_composite(canvas, layer)
+    return canvas
 
 
 def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
-           x_pct: int, ground_pct: int, opacity: int, softness: int, spread: float):
+           x_pct: int, ground_pct: int, opacity: int, softness: int, spread: float,
+           left_tyre_pct: int, right_tyre_pct: int):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
     target_width = max(1, round(bw * size_pct / 100))
@@ -84,9 +126,11 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
     top = round(bh * ground_pct / 100 - target_height)
 
     composited = background.copy().convert("RGBA")
-    composited = draw_contact_shadow(composited, left, top, target_width, target_height,
-                                     opacity, softness, spread)
-    # Alpha compositing correctly keeps translucent edges (unlike masking twice).
+    composited = draw_contact_shadow(
+        composited, vehicle, left, top, opacity, softness, spread,
+        left_tyre_pct / 100, right_tyre_pct / 100
+    )
+    # Put original vehicle pixels above the shadows; preserve translucent edges.
     vehicle_layer = Image.new("RGBA", composited.size, (0, 0, 0, 0))
     vehicle_layer.paste(vehicle, (left, top))
     composited = Image.alpha_composite(composited, vehicle_layer)
@@ -107,7 +151,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1 · Real image cut-out, fixed uploaded showroom background, contact shadows and full-size export")
+st.caption("Prototype 1.1 · Vehicle cut-out, grounded tyre shadows and full-size export")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -124,6 +168,10 @@ with st.sidebar:
     opacity = st.slider("Shadow strength", 0, 220, 115)
     softness = st.slider("Shadow softness (pixels)", 0, 90, 24)
     spread = st.slider("Shadow width", 0.5, 1.5, 1.0, 0.05)
+    with st.expander("Tyre contact positions (optional)"):
+        st.caption("Move the two contact points if a shadow misses a tyre.")
+        left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50)
+        right_tyre_pct = st.slider("Right tyre position (% of cut-out width)", 5, 95, 87)
     st.header("4 · Preview")
     show_crop = st.checkbox("Show centred 4:5 crop guide in preview", value=False)
 
@@ -153,7 +201,7 @@ else:
 
 try:
     final, fits = render(background, vehicle, size_pct, x_pct, ground_pct,
-                         opacity, softness, spread)
+                         opacity, softness, spread, left_tyre_pct, right_tyre_pct)
 except ValueError as ex:
     st.error(str(ex))
     st.stop()
