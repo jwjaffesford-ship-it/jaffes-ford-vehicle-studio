@@ -9,12 +9,58 @@ from __future__ import annotations
 
 import hashlib
 import io
+import zipfile
 
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 st.set_page_config(page_title="Jaffes Ford Vehicle Studio", page_icon="🚘", layout="wide")
+
+# The ZIP supplied by the dealership uses these nine numbered template files.
+# The ZIP is read in memory; nothing is uploaded to the public GitHub repository.
+TEMPLATE_ANGLES = [
+    ("02", "Left side"),
+    ("03", "Right side"),
+    ("04", "Front 30° — view 1"),
+    ("05", "Front 30° — view 2"),
+    ("06", "Straight front"),
+    ("07", "Straight rear"),
+    ("08", "Rear 30° — view 1"),
+    ("09", "Rear 30° — view 2"),
+    ("10", "Rear tailgate open"),
+]
+
+
+def template_from_zip(data: bytes, prefix: str):
+    """Return a PNG/JPEG angle reference from the approved numbered ZIP."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            candidates = [
+                n for n in archive.namelist()
+                if n.split("/")[-1].lower().startswith(prefix + "_")
+                and n.lower().endswith((".png", ".jpg", ".jpeg"))
+                and not n.startswith("__MACOSX")
+            ]
+            if not candidates:
+                return None
+            return load_png(archive.read(sorted(candidates)[0]))
+    except (zipfile.BadZipFile, OSError):
+        return None
+
+
+def preview_with_template(final: Image.Image, reference: Image.Image, opacity: int) -> Image.Image:
+    """Ghost the angle reference over the preview only, never over the final PNG."""
+    size = final.size
+    reference = reference.resize(size, Image.Resampling.LANCZOS)
+    base = final.convert("RGBA")
+    alpha = reference.getchannel("A")
+    factor = opacity / 100
+    alpha = alpha.point(lambda n: round(n * factor))
+    ghost = reference.copy()
+    ghost.putalpha(alpha)
+    return Image.alpha_composite(base, ghost)
+
 
 
 @st.cache_data(show_spinner=False, max_entries=15)
@@ -156,7 +202,7 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
     vehicle_layer.paste(vehicle, (left, top))
     composited = Image.alpha_composite(composited, vehicle_layer)
     fits = (left >= 0 and top >= 0 and left + target_width <= bw and top + target_height <= bh)
-    return composited, fits
+    return composited, fits, (left, top, left + target_width, top + target_height)
 
 
 def crop_guide(image: Image.Image) -> Image.Image:
@@ -172,7 +218,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.2 · Refined background masking, tyre contact shadows and full-size export")
+st.caption("Prototype 1.3 · Template comparison, refined masking, tyre shadows and clean 200-dpi export")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -196,11 +242,24 @@ with st.sidebar:
     else:
         model_choice = "Standard (faster)"
         cleanup = 0
-    st.header("2 · Position vehicle")
+    st.header("2 · Ford angle template")
+    angle_label = st.selectbox("Reference angle", [name for _, name in TEMPLATE_ANGLES])
+    angle_prefix = next(prefix for prefix, name in TEMPLATE_ANGLES if name == angle_label)
+    template_zip = st.file_uploader(
+        "Upload complete approved Ford template ZIP (optional)", type=["zip"], key="templates_zip",
+        help="The nine approved angle files must retain their original numbered filenames.",
+    )
+    angle_reference = st.file_uploader(
+        "Or upload just this angle template", type=["png", "jpg", "jpeg"], key="angle_reference",
+    )
+    show_template = st.checkbox("Ghost reference over preview", value=True)
+    template_opacity = st.slider("Reference visibility (%)", 10, 80, 40, 5)
+    st.caption("These references help manual matching. This version does not yet auto-align the vehicle.")
+    st.header("3 · Position vehicle")
     size_pct = st.slider("Vehicle width (% of showroom width)", 10, 105, 65)
     x_pct = st.slider("Horizontal centre (%)", 0, 100, 50)
     ground_pct = st.slider("Ground contact height (%)", 25, 100, 83)
-    st.header("3 · Floor shadow")
+    st.header("4 · Floor shadow")
     opacity = st.slider("Shadow strength", 0, 220, 80)
     softness = st.slider("Shadow softness (pixels)", 0, 90, 18)
     spread = st.slider("Shadow width", 0.5, 1.5, 0.85, 0.05)
@@ -208,7 +267,7 @@ with st.sidebar:
         st.caption("Move the two contact points if a shadow misses a tyre.")
         left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50)
         right_tyre_pct = st.slider("Right tyre position (% of cut-out width)", 5, 95, 87)
-    st.header("4 · Preview")
+    st.header("5 · Preview")
     show_crop = st.checkbox("Show centred 4:5 crop guide in preview", value=False)
 
 if background_upload is None or vehicle_upload is None:
@@ -237,11 +296,21 @@ else:
         st.warning("Your image has no transparent pixels. Use automatic background removal, or upload an already cut-out PNG.")
 
 try:
-    final, fits = render(background, vehicle, size_pct, x_pct, ground_pct,
+    final, fits, vehicle_box = render(background, vehicle, size_pct, x_pct, ground_pct,
                          opacity, softness, spread, left_tyre_pct, right_tyre_pct)
 except ValueError as ex:
     st.error(str(ex))
     st.stop()
+
+template_bytes = None
+if angle_reference is not None:
+    template_bytes = load_png(angle_reference.getvalue())
+elif template_zip is not None:
+    template_bytes = template_from_zip(template_zip.getvalue(), angle_prefix)
+if template_zip is not None and template_bytes is None:
+    st.warning("The selected angle was not found in the ZIP. Please choose a matching individual template image.")
+
+reference = parse_image(template_bytes) if template_bytes else None
 
 left_col, right_col = st.columns([1, 2])
 with left_col:
@@ -250,8 +319,29 @@ with left_col:
     st.caption("Review above the roof, mirrors, wheel edges and any remaining source floor. Increase 'Remove background haze' or select the Detailed model if needed.")
 with right_col:
     st.subheader("Showroom composite")
-    st.image(crop_guide(final) if show_crop else final, use_container_width=True)
-    st.caption("Preview guide is never included in the final exported photograph.")
+    preview = crop_guide(final) if show_crop else final
+    if reference is not None and show_template:
+        preview = preview_with_template(preview, reference, template_opacity)
+    st.image(preview, use_container_width=True)
+    st.caption("Reference/template and red crop guides are preview-only. They are NEVER included in the final download.")
+
+if reference is not None:
+    with st.expander("Show selected Ford angle template on its own"):
+        st.image(reference, use_container_width=True)
+        st.caption("Compare roofline, wheel position and vehicle proportions with the reference.")
+else:
+    st.info("No Ford angle template uploaded yet. Upload your approved template ZIP, or one angle image, to compare vehicle placement.")
+
+if "30°" in angle_label:
+    width, height = background.size
+    safe_width = min(width, round(height * 4 / 5))
+    safe_left = (width - safe_width) // 2
+    safe_right = safe_left + safe_width
+    crop_fit = vehicle_box[0] >= safe_left and vehicle_box[2] <= safe_right and vehicle_box[1] >= 0 and vehicle_box[3] <= height
+    if crop_fit:
+        st.success("The vehicle appears inside the centred 4:5 crop guide. Check the actual angle template, too.")
+    else:
+        st.warning("The vehicle extends outside the centred 4:5 crop guide. Decrease width or adjust position before exporting.")
 
 if not fits:
     st.warning("Part of the vehicle is outside the showroom image. Adjust its size or position before exporting.")
@@ -262,4 +352,4 @@ st.download_button("Download full-size PNG · 200 dpi", output.getvalue(),
                    file_name="Jaffes_Ford_vehicle_composite_200dpi.png", mime="image/png")
 st.caption(f"Export size: {background.width} × {background.height} pixels. The original showroom pixel dimensions are preserved.")
 st.divider()
-st.markdown("**Coming in the next version:** locked showroom assets, all nine angle templates, automatic template placement, accurate roofline alignment, 4:5 safe-area validation and batch downloads.")
+st.markdown("**Next upgrades:** persistent locked templates, automatic reference alignment, roofline matching, exact crop-safe enforcement, improved tyre grounding, and batch downloads.")
