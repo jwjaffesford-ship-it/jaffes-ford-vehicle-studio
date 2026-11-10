@@ -50,3 +50,15 @@ The app has a **6 · Approved placement presets** section in the left sidebar.
 A saved preset is an exact record of the current settings, not a guess reconstructed from screenshots. It is per angle; saving another angle does not overwrite a different angle. Import validates the supported numeric ranges. Approved layout is not automatically resized, and any crop-margin suggestions remain optional. Review the actual image before export.
 
 Version 1.9 also adds a slightly more concentrated contact-shadow layer. Shadow quality is still approximate and depends on correctly placing tyre markers. Preset storage is currently limited to your session plus the downloadable JSON backup; permanent multi-user storage and login are future work.
+
+## Full underbody shadows (Version 2.1)
+
+The **4 · Floor shadow** panel now has:
+- **Whole-vehicle underbody shadow (%)** — a separate soft chassis shadow spanning approximately the full width of the cut-out, not merely a line between two wheel markers
+- **Underbody shadow depth (%)** — adjusts the projected depth of that broad floor shadow
+- The original **Shadow strength**, **Shadow softness** and **Shadow width** controls still work
+- **Add two more tyre contact shadows (optional)** — shows two extra adjustable tyre markers and tighter contact shadows for additional wheels, when visually appropriate
+
+The underbody is a perspective-aware photographic approximation based on the known tyre contact positions. Review the floor under both axles and the chassis, because accurate photographic shadow direction requires user inspection. Every shadow is composited behind the uploaded original vehicle and over the fixed original showroom image, never into the vehicle pixels. The red roofline/crop guide and yellow marker labels remain preview-only. The program does not change the approved vehicle's scale, angle, or position when any shadow control is moved.
+
+Previously downloaded Version 1.9 preset JSON files still import. New shadow controls receive defaults when importing old presets. After fine-tuning shadows, save the placement again and download a new JSON backup.
