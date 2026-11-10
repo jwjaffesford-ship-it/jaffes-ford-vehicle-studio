@@ -37,3 +37,16 @@ streamlit run app.py
 ## Planned next steps
 
 Locked master background and all nine vehicle template references, template matching, crop safe placement, improved shadows, batch processing, better masking and secure staff access.
+
+## Approved placement presets (Version 1.9)
+
+The app has a **6 · Approved placement presets** section in the left sidebar.
+
+1. Upload your Ford master background and vehicle, select the matching angle, and adjust placement and shadows until you approve the preview.
+2. Click **Save current placement as approved**. This saves every relevant slider for that angle in the current Streamlit session; it does **not** save or publish photos.
+3. Click **Download preset backup (.json)** and save the JSON file on your own computer. This is essential: Streamlit session state is temporary and can be cleared by a server restart or browser session change.
+4. When returning later, upload that JSON under **Restore a preset backup (.json)**, click **Import preset backup**, select the matching angle, and click **Load approved placement for selected angle**.
+
+A saved preset is an exact record of the current settings, not a guess reconstructed from screenshots. It is per angle; saving another angle does not overwrite a different angle. Import validates the supported numeric ranges. Approved layout is not automatically resized, and any crop-margin suggestions remain optional. Review the actual image before export.
+
+Version 1.9 also adds a slightly more concentrated contact-shadow layer. Shadow quality is still approximate and depends on correctly placing tyre markers. Preset storage is currently limited to your session plus the downloadable JSON backup; permanent multi-user storage and login are future work.
