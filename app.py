@@ -223,6 +223,79 @@ def refine_cutout(image: Image.Image, cleanup: int) -> Image.Image:
     return result
 
 
+def remove_detached_fragments(image: Image.Image) -> tuple[Image.Image, int]:
+    """Remove isolated AI-mask fragments outside the main vehicle silhouette.
+
+    Work on the alpha mask ONLY: RGB vehicle pixels are never regenerated,
+    retouched, recoloured or altered. Nearby disconnected pieces are preserved
+    to protect mirrors, roof equipment and other delicate accessories.
+
+    SciPy provides fast, connected-component labelling for full-resolution masks.
+    The toggle in the UI lets the operator compare against the unmodified mask.
+    """
+    from scipy import ndimage
+
+    alpha = np.array(image.getchannel("A"), dtype=np.uint8)
+    binary = alpha > 90
+    if not np.any(binary):
+        return image, 0
+
+    labels, count = ndimage.label(
+        binary, structure=np.ones((3, 3), dtype=np.uint8)
+    )
+    if count <= 1:
+        return image, 0
+
+    areas = np.bincount(labels.ravel(), minlength=count + 1)
+    areas[0] = 0
+    primary_label = int(np.argmax(areas))
+    if areas[primary_label] <= 0:
+        return image, 0
+
+    boxes = ndimage.find_objects(labels)
+    primary_box = boxes[primary_label - 1]
+    py0, py1 = primary_box[0].start, primary_box[0].stop
+    px0, px1 = primary_box[1].start, primary_box[1].stop
+    # Accessories just outside the body silhouette can be disconnected by AI
+    # segmentation; retain components within a small protected perimeter.
+    pad = max(9, round(max(px1 - px0, py1 - py0) * 0.055))
+    protected = (px0 - pad, py0 - pad, px1 + pad, py1 + pad)
+
+    keep = np.zeros(count + 1, dtype=np.bool_)
+    keep[0] = False
+    keep[primary_label] = True
+    removed = 0
+    for label_num in range(1, count + 1):
+        if label_num == primary_label:
+            continue
+        area = int(areas[label_num])
+        if area == 0:
+            continue
+        object_box = boxes[label_num - 1]
+        if object_box is None:
+            continue
+        y0, y1 = object_box[0].start, object_box[0].stop
+        x0, x1 = object_box[1].start, object_box[1].stop
+        near_body = (
+            x1 >= protected[0] and x0 <= protected[2]
+            and y1 >= protected[1] and y0 <= protected[3]
+        )
+        # Keep substantial detached parts even if they're farther away, so
+        # isolated real accessories are not automatically discarded.
+        large = area >= max(45, int(areas[primary_label] * 0.035))
+        if near_body or large:
+            keep[label_num] = True
+        else:
+            removed += 1
+
+    if removed == 0:
+        return image, 0
+    output = image.copy()
+    alpha[~keep[labels]] = 0
+    output.putalpha(Image.fromarray(alpha, mode="L"))
+    return output, removed
+
+
 def parse_image(png_bytes: bytes) -> Image.Image:
     with Image.open(io.BytesIO(png_bytes)) as image:
         return image.convert("RGBA")
@@ -629,7 +702,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.9 · Approved angle presets, improved tyre shadows and 200-dpi export")
+st.caption("Prototype 2.0 · Detached-fragment cleanup, approved angle presets and contact shadows")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -650,9 +723,15 @@ with st.sidebar:
             min_value=0, max_value=90, value=35, step=5,
             help="Higher values remove faint unwanted pixels, but may also trim thin or translucent vehicle details. Review roof, mirrors, tyres and glass.",
         )
+        remove_islands = st.checkbox(
+            "Remove detached background fragments", value=True,
+            help="Removes small isolated objects outside the main vehicle silhouette (such as the floating speck above the white Ranger). "
+                 "This changes transparency only. Turn off if a real accessory disappears.",
+        )
     else:
         model_choice = "Standard (faster)"
         cleanup = 0
+        remove_islands = False
     st.header("2 · Ford angle template")
     angle_label = st.selectbox("Reference angle", [name for _, name in TEMPLATE_ANGLES])
     angle_prefix = next(prefix for prefix, name in TEMPLATE_ANGLES if name == angle_label)
@@ -771,6 +850,9 @@ if remove_background:
         with st.spinner("Removing the original background from the vehicle photo..."):
             selected_model = "isnet-general-use" if model_choice.startswith("Detailed") else "u2netp"
             vehicle = refine_cutout(parse_image(generate_cutout(vehicle_bytes, selected_model)), cleanup)
+            cleaned_fragments = 0
+            if remove_islands:
+                vehicle, cleaned_fragments = remove_detached_fragments(vehicle)
     except Exception as ex:
         st.error("Automatic cut-out failed. Please retry or upload a transparent PNG vehicle image.")
         with st.expander("Technical details"):
@@ -778,6 +860,7 @@ if remove_background:
         st.stop()
 else:
     vehicle = original_vehicle
+    cleaned_fragments = 0
     if vehicle.getchannel("A").getextrema()[0] == 255:
         st.warning("Your image has no transparent pixels. Use automatic background removal, or upload an already cut-out PNG.")
 
@@ -804,6 +887,8 @@ left_col, right_col = st.columns([1, 2])
 with left_col:
     st.subheader("Vehicle cut-out")
     st.image(vehicle, use_container_width=True)
+    if remove_islands and cleaned_fragments:
+        st.caption(f"Removed {cleaned_fragments} detached mask fragment(s). Verify mirrors, roof accessories and fine edges.")
     st.caption("Review above the roof, mirrors, wheel edges and any remaining source floor. Increase 'Remove background haze' or select the Detailed model if needed.")
 with right_col:
     st.subheader("Showroom composite")
