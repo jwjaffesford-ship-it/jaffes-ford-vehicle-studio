@@ -900,27 +900,27 @@ with st.sidebar:
             key="extra_tyres_checkbox",
             help="For the wheels that do not yet have a contact shadow. Check their markers and adjust carefully.",
         )
-        with st.expander("Additional tyre shadow positions", expanded=extra_enabled):
-            rear_extra_x = st.slider(
-                "Additional tyre 3 horizontal position (%)", 5, 95, 13, 1,
-                key="extra_tyre_rear_pct",
-                disabled=not extra_enabled,
-            )
-            far_extra_x = st.slider(
-                "Additional tyre 4 horizontal position (%)", 5, 95, 75, 1,
-                key="extra_tyre_far_pct",
-                disabled=not extra_enabled,
-            )
-            rear_extra_y = st.slider(
-                "Additional tyre 3 vertical offset (pixels)", -80, 80, 0, 1,
-                key="extra_tyre_rear_y",
-                disabled=not extra_enabled,
-            )
-            far_extra_y = st.slider(
-                "Additional tyre 4 vertical offset (pixels)", -80, 80, -10, 1,
-                key="extra_tyre_far_y",
-                disabled=not extra_enabled,
-            )
+        st.caption("Additional tyre contacts (optional; enable checkbox above)")
+        rear_extra_x = st.slider(
+            "Additional tyre 3 horizontal position (%)", 5, 95, 13, 1,
+            key="extra_tyre_rear_pct",
+            disabled=not extra_enabled,
+        )
+        far_extra_x = st.slider(
+            "Additional tyre 4 horizontal position (%)", 5, 95, 75, 1,
+            key="extra_tyre_far_pct",
+            disabled=not extra_enabled,
+        )
+        rear_extra_y = st.slider(
+            "Additional tyre 3 vertical offset (pixels)", -80, 80, 0, 1,
+            key="extra_tyre_rear_y",
+            disabled=not extra_enabled,
+        )
+        far_extra_y = st.slider(
+            "Additional tyre 4 vertical offset (pixels)", -80, 80, -10, 1,
+            key="extra_tyre_far_y",
+            disabled=not extra_enabled,
+        )
         if angle_label == "Front 30° — view 2":
             st.button(
                 "Apply Ranger 30° shadow starting points",
