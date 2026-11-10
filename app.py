@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import math
 import zipfile
 
 import numpy as np
@@ -31,6 +33,118 @@ TEMPLATE_ANGLES = [
     ("10", "Rear tailgate open"),
 ]
 
+
+
+# Approved settings use fixed field names and validated numeric slider bounds.
+# No vehicle photo, master background or personal data is stored in preset JSON.
+PRESET_FIELDS = {
+    "vehicle_width_slider": (10, 105, "int"),
+    "vehicle_center_slider": (0, 100, "int"),
+    "vehicle_ground_slider": (25, 100, "int"),
+    "fine_x_slider": (-100, 100, "int"),
+    "fine_y_slider": (-100, 100, "int"),
+    "fine_scale_slider": (90.0, 110.0, "decimal"),
+    "tyre_front_pos": (5, 95, "int"),
+    "tyre_rear_pos": (5, 95, "int"),
+    "tyre_front_y": (-50, 50, "int"),
+    "tyre_rear_y": (-50, 50, "int"),
+    "shadow_opacity_slider": (0, 220, "int"),
+    "shadow_softness_slider": (0, 90, "int"),
+    "shadow_spread_slider": (0.5, 1.5, "spread"),
+}
+
+
+def snapshot_current_settings():
+    """Read only the settings actually shown and set in this user's session."""
+    settings = {}
+    for key in PRESET_FIELDS:
+        if key not in st.session_state:
+            raise ValueError("Please load a vehicle and its settings before saving.")
+        settings[key] = st.session_state[key]
+    return settings
+
+
+def validate_preset_values(values):
+    if not isinstance(values, dict) or set(values) != set(PRESET_FIELDS):
+        raise ValueError("The preset contains missing or unsupported settings.")
+    cleaned = {}
+    for key, (low, high, kind) in PRESET_FIELDS.items():
+        value = values[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("Invalid value for " + key)
+        if not low <= value <= high:
+            raise ValueError("Out-of-range value for " + key)
+        if kind == "int":
+            if int(value) != value:
+                raise ValueError("Expected whole number for " + key)
+            value = int(value)
+        elif kind == "decimal":
+            value = round(float(value), 1)
+        else:
+            value = round(round(float(value) / 0.05) * 0.05, 2)
+        cleaned[key] = value
+    return cleaned
+
+
+def save_current_approved_preset(angle):
+    try:
+        record = validate_preset_values(snapshot_current_settings())
+        # Save the exact user-approved values; never guess from screenshot or auto-fit.
+        st.session_state["approved_angle_presets"][angle] = record
+        st.session_state["preset_notice"] = (
+            "success", "Saved approved settings for " + angle + ". Download the JSON backup below."
+        )
+    except ValueError as error:
+        st.session_state["preset_notice"] = ("error", str(error))
+
+
+def load_approved_preset(angle):
+    record = st.session_state["approved_angle_presets"].get(angle)
+    if record is None:
+        st.session_state["preset_notice"] = ("warning", "No saved settings for this angle yet.")
+        return
+    try:
+        values = validate_preset_values(record)
+        for key, value in values.items():
+            st.session_state[key] = value
+        st.session_state["preset_notice"] = (
+            "success", "Loaded approved settings for " + angle + ". Please check the preview."
+        )
+    except ValueError as error:
+        st.session_state["preset_notice"] = ("error", str(error))
+
+
+def import_approved_presets(upload_bytes):
+    try:
+        if len(upload_bytes) > 200_000:
+            raise ValueError("The settings file is too large.")
+        payload = json.loads(upload_bytes.decode("utf-8-sig"))
+        if not isinstance(payload, dict) or payload.get("format") != "jaffes-ford-angle-presets" or payload.get("version") != 1:
+            raise ValueError("This is not a Version 1 Jaffes Ford placement preset file.")
+        records = payload.get("presets")
+        if not isinstance(records, dict) or len(records) > len(TEMPLATE_ANGLES):
+            raise ValueError("The file has an invalid number of template presets.")
+        valid_angles = {name for _, name in TEMPLATE_ANGLES}
+        incoming = {}
+        for angle, values in records.items():
+            if angle not in valid_angles:
+                raise ValueError("Unknown template angle in the file: " + str(angle))
+            incoming[angle] = validate_preset_values(values)
+        st.session_state["approved_angle_presets"].update(incoming)
+        st.session_state["preset_notice"] = (
+            "success", f"Imported {len(incoming)} angle preset(s). Select the angle and click Load."
+        )
+    except (ValueError, UnicodeError, json.JSONDecodeError) as error:
+        st.session_state["preset_notice"] = ("error", "Could not import presets: " + str(error))
+
+
+def preset_download_data():
+    payload = {
+        "format": "jaffes-ford-angle-presets",
+        "version": 1,
+        "presets": st.session_state["approved_angle_presets"],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 def template_from_zip(data: bytes, prefix: str):
     """Return a PNG/JPEG angle reference from the approved numbered ZIP."""
@@ -185,8 +299,21 @@ def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, to
                              fill=min(255, round(opacity * 1.25)))
     contact = contact.filter(ImageFilter.GaussianBlur(max(1, round(softness * 0.25))))
 
-    # Alpha composite the dark layers against the original untouched showroom.
-    for mask in (ambient, contact):
+    # A smaller, lower-blur core makes the contact look attached to the floor
+    # without creating a broad floating oval or altering original vehicle pixels.
+    core = Image.new("L", canvas.size, 0)
+    core_draw = ImageDraw.Draw(core)
+    core_rx = max(3, round(width * 0.021 * spread))
+    core_ry = max(2, round(width * 0.006 * spread))
+    for x, y in points:
+        core_draw.ellipse(
+            (x - core_rx, y - core_ry, x + core_rx, y + core_ry),
+            fill=min(215, round(opacity * 1.15)),
+        )
+    core = core.filter(ImageFilter.GaussianBlur(max(1, round(softness * 0.12))))
+
+    # Alpha composite the shadows against the original untouched showroom.
+    for mask in (ambient, contact, core):
         layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
         layer.putalpha(mask)
         canvas = Image.alpha_composite(canvas, layer)
@@ -500,8 +627,9 @@ def crop_guide(image: Image.Image) -> Image.Image:
     return preview
 
 
+st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 1.8 · Safer 4:5 crop fitting, roofline alignment and tyre-contact shadows")
+st.caption("Prototype 1.9 · Approved angle presets, improved tyre shadows and 200-dpi export")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -552,9 +680,9 @@ with st.sidebar:
         fine_y = st.slider("Fine vertical shift (pixels)", -100, 100, 0, 1, key="fine_y_slider")
         fine_scale_pct = st.slider("Fine size adjustment (%)", 90.0, 110.0, 100.0, 0.1, key="fine_scale_slider")
     st.header("4 · Floor shadow")
-    opacity = st.slider("Shadow strength", 0, 220, 80)
-    softness = st.slider("Shadow softness (pixels)", 0, 90, 18)
-    spread = st.slider("Shadow width", 0.5, 1.5, 0.85, 0.05)
+    opacity = st.slider("Shadow strength", 0, 220, 80, key="shadow_opacity_slider")
+    softness = st.slider("Shadow softness (pixels)", 0, 90, 18, key="shadow_softness_slider")
+    spread = st.slider("Shadow width", 0.5, 1.5, 0.85, 0.05, key="shadow_spread_slider")
     with st.expander("Tyre contact positions (optional)"):
         st.caption("Move the two contact points if a shadow misses a tyre.")
         left_tyre_pct = st.slider("Left tyre position (% of cut-out width)", 5, 95, 50, key="tyre_front_pos")
@@ -570,6 +698,63 @@ with st.sidebar:
             )
     st.header("5 · Preview")
     show_crop = st.checkbox("Show centred 4:5 crop guide in preview", value=False)
+
+    st.header("6 · Approved placement presets")
+    st.caption(
+        "The settings below save vehicle placement and shadow controls by Ford angle. "
+        "They do not save a vehicle photo or change your showroom background."
+    )
+    st.button(
+        "Save current placement as approved",
+        on_click=save_current_approved_preset,
+        args=(angle_label,),
+        use_container_width=True,
+        disabled=(background_upload is None or vehicle_upload is None),
+        type="primary",
+        help="Only click when the placement on your screen is approved.",
+    )
+    stored_angles = st.session_state["approved_angle_presets"]
+    st.button(
+        "Load approved placement for selected angle",
+        on_click=load_approved_preset,
+        args=(angle_label,),
+        use_container_width=True,
+        disabled=angle_label not in stored_angles,
+    )
+    if angle_label in stored_angles:
+        st.caption("Approved settings available for: " + angle_label)
+    else:
+        st.caption("No approved placement saved yet for: " + angle_label)
+    if stored_angles:
+        st.caption("Saved in this session: " + ", ".join(stored_angles.keys()))
+    st.download_button(
+        "Download preset backup (.json)",
+        data=preset_download_data(),
+        file_name="Jaffes_Ford_Approved_Angle_Presets.json",
+        mime="application/json",
+        use_container_width=True,
+        disabled=not bool(stored_angles),
+        help="Important: this file keeps your settings across Streamlit restarts. Save it on your computer.",
+    )
+    preset_upload = st.file_uploader(
+        "Restore a preset backup (.json)", type=["json"], key="preset_import_upload"
+    )
+    st.button(
+        "Import preset backup",
+        on_click=import_approved_presets,
+        args=(preset_upload.getvalue(),) if preset_upload is not None else (b"",),
+        use_container_width=True,
+        disabled=preset_upload is None,
+        help="Import first, then select the matching Ford angle and click Load approved placement.",
+    )
+    if "preset_notice" in st.session_state:
+        notice_type, notice_text = st.session_state["preset_notice"]
+        if notice_type == "success":
+            st.success(notice_text)
+        elif notice_type == "warning":
+            st.warning(notice_text)
+        else:
+            st.error(notice_text)
 
 if background_upload is None or vehicle_upload is None:
     st.write("Upload both images using the panel on the left to begin.")
@@ -796,4 +981,4 @@ st.download_button("Download full-size PNG · 200 dpi", output.getvalue(),
                    file_name="Jaffes_Ford_vehicle_composite_200dpi.png", mime="image/png")
 st.caption(f"Export size: {background.width} × {background.height} pixels. The original showroom pixel dimensions are preserved.")
 st.divider()
-st.markdown("**Next upgrades:** locked showroom and template references, model-specific alignment presets, manual mask touch-up and batch downloads.")
+st.markdown("**Next upgrades:** permanent staff-access storage, improved masking and bulk processing. Download approved JSON presets to keep them safe across app restarts.")
