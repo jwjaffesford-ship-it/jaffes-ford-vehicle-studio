@@ -89,3 +89,32 @@ high settings can produce unnatural dark spots.
 Existing JSON placement backups from earlier versions remain importable:
 all new wheel-shadow values receive safe defaults when missing. To keep the
 new values, re-save the angle and download an updated preset JSON file.
+
+## Four-wheel shadows for unseen tyres (Version 2.4)
+
+**All four tyres contribute to the floor shadow, even when only two can be seen.**
+The program estimates the two hidden-wheel contacts from the two visible wheel
+contact points and a perspective offset for the chosen camera angle. Both
+hidden-wheel patches are deliberately more subtle than visible-wheel patches,
+and a four-corner floor quadrilateral helps connect them to the underbody shadow.
+They do not create extra visible wheels on the vehicle itself.
+
+Inside **Tyre contact positions (optional)**:
+- **Include shadows from the two hidden tyres** defaults to enabled. Leave it on
+  for normal four-wheel Ford photographs.
+- **Hidden-wheel sideways perspective** adjusts whether the far-side wheels lie
+  toward the left or right of the photograph. Default -14% is only a starting
+  estimate for the tested front 30-degree view.
+- **Hidden-wheel floor depth** adjusts how far up the showroom floor the far-side
+  wheel contact points sit. Default 12% is a starting estimate.
+- **Show tyre-shadow points on preview** shows yellow markers for the visible
+  wheels and blue markers for inferred hidden contacts. This overlay is never
+  included in exported images.
+- **Manually override inferred hidden-wheel positions** is for unusual viewing
+  angles only; otherwise leave it unticked to prevent incorrect dark spots
+  around the bumper.
+
+The inferred far-side wheel positions are not physically measured and will
+need calibration per template angle. Existing placement presets are compatible
+and default to four-wheel shadows when the new settings are absent. Your
+approved vehicle crop, scale and roofline are unchanged by this update.
