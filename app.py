@@ -35,7 +35,10 @@ def render_showroom_shadows(*args, **kwargs):
         importlib.invalidate_caches()
         renderer = importlib.reload(shadow_engine).render_showroom_shadows
         missing = set(kwargs) - set(inspect.signature(renderer).parameters)
-    optional_new_controls = {"tyre_contact_darkness", "tyre_contact_size"}
+    optional_new_controls = {
+        "tyre_contact_darkness", "tyre_contact_size",
+        "hidden_wheel_blend", "chassis_density",
+    }
     if missing:
         if not missing.issubset(optional_new_controls):
             raise RuntimeError(
@@ -73,6 +76,8 @@ TEMPLATE_ANGLES = [
 # Approved settings use fixed field names and validated numeric slider bounds.
 # No vehicle photo, master background or personal data is stored in preset JSON.
 PRESET_OPTIONAL_DEFAULTS = {
+    "hidden_wheel_blend_slider": 55,
+    "chassis_density_slider": 115,
     "hidden_wheel_shadows_checkbox": True,
     "hidden_wheel_lateral_slider": -14,
     "hidden_wheel_depth_slider": 12,
@@ -93,6 +98,8 @@ PRESET_OPTIONAL_DEFAULTS = {
 }
 
 PRESET_FIELDS = {
+    "hidden_wheel_blend_slider": (0, 150, "int"),
+    "chassis_density_slider": (50, 200, "int"),
     "hidden_wheel_shadows_checkbox": (False, True, "bool"),
     "hidden_wheel_lateral_slider": (-35, 35, "int"),
     "hidden_wheel_depth_slider": (0, 30, "int"),
@@ -436,6 +443,8 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            hidden_wheel_shadows: bool = True,
            hidden_lateral_pct: int = -14,
            hidden_depth_pct: int = 12,
+           hidden_wheel_blend: int = 55,
+           chassis_density: int = 115,
            fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
@@ -484,6 +493,8 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
         cast_vertical=cast_vertical,
         tyre_contact_darkness=tyre_contact_darkness,
         tyre_contact_size=tyre_contact_size,
+        hidden_wheel_blend=hidden_wheel_blend,
+        chassis_density=chassis_density,
     )
     # Put original vehicle pixels above the shadows; preserve translucent edges.
     vehicle_layer = Image.new("RGBA", composited.size, (0, 0, 0, 0))
@@ -774,7 +785,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 2.4 · Four-wheel floor-shadow footprint with inferred hidden tyre contacts")
+st.caption("Prototype 2.5 · Photo-matched connected underbody shadows and subtle hidden-tyre support")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -856,6 +867,11 @@ with st.sidebar:
         key="underbody_depth_slider",
         help="Controls how far the shadow extends beneath the vehicle in floor perspective.",
     )
+    chassis_density = st.slider(
+        "Front and mid-chassis shadow fullness (%)", 50, 200, 115, 5,
+        key="chassis_density_slider",
+        help="Blends a connected soft shadow from the engine bay through the cabin and side step, tapering toward the rear.",
+    )
     st.caption("Projected shadow from the whole vehicle silhouette (OpenCV)")
     cast_strength = st.slider(
         "Directional cast shadow (%)", 0, 150, 75, 5,
@@ -889,7 +905,7 @@ with st.sidebar:
             help="Moves only the contact shadow and marker, not the vehicle.",
         )
         show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False, key="shadow_marker_preview")
-        st.caption("Yellow markers = visible tyres. Blue markers = inferred hidden tyres. Markers never appear in exports.")
+        st.caption("Yellow = visible contact shadows; blue = inferred hidden tyre support for the continuous chassis shadow. No distinct blue-wheel patches are drawn or exported.")
         hidden_wheel_shadows = st.checkbox(
             "Include shadows from the two hidden tyres", value=True,
             key="hidden_wheel_shadows_checkbox",
@@ -908,6 +924,12 @@ with st.sidebar:
             key="hidden_wheel_depth_slider",
             disabled=not hidden_wheel_shadows,
             help="Higher values project far-side tyre contacts farther up the showroom floor.",
+        )
+        hidden_wheel_blend = st.slider(
+            "Hidden-wheel shadow blend into chassis (%)", 0, 150, 55, 5,
+            key="hidden_wheel_blend_slider",
+            disabled=not hidden_wheel_shadows,
+            help="Hidden tyres broaden the underbody shadow but do not cast separate dark contact spots. Higher values add more soft far-side weight.",
         )
         extra_enabled = st.checkbox(
             "Manually override inferred hidden-wheel positions", value=False,
@@ -1050,6 +1072,8 @@ try:
                          hidden_wheel_shadows=hidden_wheel_shadows,
                          hidden_lateral_pct=hidden_lateral,
                          hidden_depth_pct=hidden_depth,
+                         hidden_wheel_blend=hidden_wheel_blend,
+                         chassis_density=chassis_density,
                          fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
 except ValueError as ex:
     st.error(str(ex))
