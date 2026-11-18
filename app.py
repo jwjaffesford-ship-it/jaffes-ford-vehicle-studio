@@ -16,6 +16,7 @@ import zipfile
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from shadow_engine import render_showroom_shadows
 
 st.set_page_config(page_title="Jaffes Ford Vehicle Studio", page_icon="🚘", layout="wide")
 
@@ -38,6 +39,9 @@ TEMPLATE_ANGLES = [
 # Approved settings use fixed field names and validated numeric slider bounds.
 # No vehicle photo, master background or personal data is stored in preset JSON.
 PRESET_OPTIONAL_DEFAULTS = {
+    "cast_strength_slider": 75,
+    "cast_horizontal_slider": -50,
+    "cast_vertical_slider": -40,
     "underbody_strength_slider": 85,
     "underbody_depth_slider": 100,
     "extra_tyres_checkbox": False,
@@ -48,6 +52,9 @@ PRESET_OPTIONAL_DEFAULTS = {
 }
 
 PRESET_FIELDS = {
+    "cast_strength_slider": (0, 150, "int"),
+    "cast_horizontal_slider": (-180, 180, "int"),
+    "cast_vertical_slider": (-180, 180, "int"),
     "underbody_strength_slider": (0, 200, "int"),
     "underbody_depth_slider": (25, 200, "int"),
     "extra_tyres_checkbox": (False, True, "bool"),
@@ -364,137 +371,6 @@ def tyre_shadow_points(vehicle: Image.Image, left: int, top: int,
     return points
 
 
-def underbody_footprint(vehicle: Image.Image, left: int, top: int, points,
-                        spread: float, depth_percent: int):
-    """A perspective floor footprint spanning the vehicle, not only two wheel patches.
-
-    The floor footprint follows the slope of two user-grounded tyre points;
-    its extent reaches the body front and rear. This is an editable photographic
-    approximation, not a 3D projection or a promise of true physical lighting.
-    """
-    width, height = vehicle.size
-    x0 = left + round(width * 0.10)
-    x1 = left + round(width * 0.92)
-    (xa, ya), (xb, yb) = points[:2]
-    if abs(xa - xb) < 2:
-        def floor_y(x):
-            return (ya + yb) / 2
-    else:
-        def floor_y(x):
-            return ya + (yb - ya) * (x - xa) / (xb - xa)
-    min_y = top + round(height * 0.59)
-    max_y = top + round(height * 1.02)
-    y0 = max(min_y, min(max_y, round(floor_y(x0))))
-    y1 = max(min_y, min(max_y, round(floor_y(x1))))
-    depth = max(14, round(width * 0.16 * spread * depth_percent / 100))
-    inset = round(width * 0.025)
-    return [
-        (x0, y0 + round(depth * 0.04)),
-        (x1, y1 + round(depth * 0.04)),
-        (x1 + inset, y1 - depth),
-        (x0 + inset, y0 - depth),
-    ]
-
-
-def draw_contact_shadow(canvas: Image.Image, vehicle: Image.Image, left: int, top: int,
-                        opacity: int, softness: int, spread: float,
-                        left_tyre_frac: float, right_tyre_frac: float,
-                        left_tyre_y: int, right_tyre_y: int,
-                        body_strength: int, body_depth: int,
-                        extra_enabled: bool, extra_rear_frac: float,
-                        extra_far_frac: float, extra_rear_y: int,
-                        extra_far_y: int) -> Image.Image:
-    """Layer floor-wide chassis shading below focused tyre-contact patches.
-
-    Only new shadow pixels are composited. The original car and showroom stay
-    unchanged; guide lines and markers remain exclusive to preview rendering.
-    """
-    if opacity <= 0:
-        return canvas
-    width, height = vehicle.size
-    near_points = tyre_shadow_points(
-        vehicle, left, top,
-        (left_tyre_frac, right_tyre_frac),
-        (left_tyre_y, right_tyre_y),
-    )
-    all_points = list(near_points)
-    if extra_enabled:
-        all_points.extend(tyre_shadow_points(
-            vehicle, left, top,
-            (extra_rear_frac, extra_far_frac),
-            (extra_rear_y, extra_far_y),
-        ))
-
-    layers = []
-    if body_strength > 0:
-        # Soft, perspective-shaped shadow extends the length of the vehicle's
-        # undercarriage rather than connecting only the selected tyres.
-        footprint = underbody_footprint(
-            vehicle, left, top, near_points, spread, body_depth
-        )
-        body = Image.new("L", canvas.size, 0)
-        draw = ImageDraw.Draw(body)
-        draw.polygon(
-            footprint,
-            fill=min(180, round(opacity * body_strength / 100 * 0.66)),
-        )
-        body = body.filter(ImageFilter.GaussianBlur(
-            radius=max(7, round(softness * 1.3)),
-        ))
-        layers.append(body)
-
-        # A soft core gives the area between axles some weight without a
-        # hard black stripe or a dark blob visibly detached from the wheels.
-        core = Image.new("L", canvas.size, 0)
-        draw_core = ImageDraw.Draw(core)
-        c0 = ((footprint[0][0] + footprint[3][0]) // 2,
-              (footprint[0][1] + footprint[3][1]) // 2)
-        c1 = ((footprint[1][0] + footprint[2][0]) // 2,
-              (footprint[1][1] + footprint[2][1]) // 2)
-        draw_core.line(
-            [c0, c1],
-            fill=min(125, round(opacity * body_strength / 100 * 0.30)),
-            width=max(12, round(width * 0.12 * spread)),
-        )
-        core = core.filter(ImageFilter.GaussianBlur(
-            radius=max(5, round(softness * 0.85)),
-        ))
-        layers.append(core)
-
-    # Each tyre that actually touches the floor gets a small dense shadow.
-    for i, (x, y) in enumerate(all_points):
-        strength_factor = 1.0 if i < 2 else 0.63
-        contact = Image.new("L", canvas.size, 0)
-        contact_draw = ImageDraw.Draw(contact)
-        rx = max(5, round(width * 0.041 * spread))
-        ry = max(3, round(width * 0.012 * spread))
-        contact_draw.ellipse(
-            (x-rx, y-ry, x+rx, y+ry),
-            fill=min(215, round(opacity * 1.20 * strength_factor)),
-        )
-        layers.append(contact.filter(
-            ImageFilter.GaussianBlur(max(1, round(softness * 0.25)))
-        ))
-
-        # Sharpest dark contact remains small and locally grounded.
-        tip = Image.new("L", canvas.size, 0)
-        td = ImageDraw.Draw(tip)
-        rx2 = max(3, round(width * 0.017 * spread))
-        ry2 = max(2, round(width * 0.005 * spread))
-        td.ellipse(
-            (x-rx2, y-ry2, x+rx2, y+ry2),
-            fill=min(210, round(opacity * 1.14 * strength_factor)),
-        )
-        layers.append(tip.filter(ImageFilter.GaussianBlur(
-            max(1, round(softness * 0.10)),
-        )))
-
-    for mask in layers:
-        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-        layer.putalpha(mask)
-        canvas = Image.alpha_composite(canvas, layer)
-    return canvas
-
 def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            x_pct: int, ground_pct: int, opacity: int, softness: int, spread: float,
            left_tyre_pct: int, right_tyre_pct: int,
@@ -503,6 +379,8 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            extra_enabled: bool = False,
            extra_rear_frac: float = 0.13, extra_far_frac: float = 0.75,
            extra_rear_y: int = 0, extra_far_y: int = -10,
+           cast_strength: int = 75, cast_horizontal: int = -50,
+           cast_vertical: int = -40,
            fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
@@ -512,14 +390,21 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
     left = round(bw * x_pct / 100 - target_width / 2) + fine_x
     top = round(bh * ground_pct / 100 - target_height) + fine_y
 
-    composited = background.copy().convert("RGBA")
-    composited = draw_contact_shadow(
-        composited, vehicle, left, top, opacity, softness, spread,
-        left_tyre_pct / 100, right_tyre_pct / 100,
-        left_tyre_y, right_tyre_y,
-        body_strength, body_depth,
-        extra_enabled, extra_rear_frac, extra_far_frac,
-        extra_rear_y, extra_far_y,
+    shadow_points = tyre_shadow_points(
+        vehicle, left, top, (left_tyre_pct / 100, right_tyre_pct / 100),
+        (left_tyre_y, right_tyre_y),
+    )
+    if extra_enabled:
+        shadow_points += tyre_shadow_points(
+            vehicle, left, top, (extra_rear_frac, extra_far_frac),
+            (extra_rear_y, extra_far_y),
+        )
+    composited = render_showroom_shadows(
+        background, vehicle, left, top, shadow_points,
+        strength=opacity, softness=softness, width_factor=spread,
+        underbody_strength=body_strength, underbody_depth=body_depth,
+        cast_strength=cast_strength, cast_horizontal=cast_horizontal,
+        cast_vertical=cast_vertical,
     )
     # Put original vehicle pixels above the shadows; preserve translucent edges.
     vehicle_layer = Image.new("RGBA", composited.size, (0, 0, 0, 0))
@@ -817,7 +702,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 2.1 · Full underbody floor shadows, optional four-tyre contacts, saved approved positions")
+st.caption("Prototype 2.2 · OpenCV perspective-projected shadows, full underbody shading and saved placements")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -887,6 +772,22 @@ with st.sidebar:
         "Underbody shadow depth (%)", 25, 200, 100, 5,
         key="underbody_depth_slider",
         help="Controls how far the shadow extends beneath the vehicle in floor perspective.",
+    )
+    st.caption("Projected shadow from the whole vehicle silhouette (OpenCV)")
+    cast_strength = st.slider(
+        "Directional cast shadow (%)", 0, 150, 75, 5,
+        key="cast_strength_slider",
+        help="Strength of the soft shadow projected from the full vehicle mask onto the showroom floor.",
+    )
+    cast_horizontal = st.slider(
+        "Cast direction: left / right", -180, 180, -50, 5,
+        key="cast_horizontal_slider",
+        help="Negative moves the shadow toward the left of the photo; positive moves it right.",
+    )
+    cast_vertical = st.slider(
+        "Cast direction: back / forward", -180, 180, -40, 5,
+        key="cast_vertical_slider",
+        help="Negative projects away from camera; positive projects toward it. These are pixels at the reference vehicle width.",
     )
     with st.expander("Tyre contact positions (optional)"):
         st.caption("Move the two contact points if a shadow misses a tyre.")
@@ -1025,6 +926,9 @@ try:
                          extra_rear_frac=rear_extra_x / 100,
                          extra_far_frac=far_extra_x / 100,
                          extra_rear_y=rear_extra_y, extra_far_y=far_extra_y,
+                         cast_strength=cast_strength,
+                         cast_horizontal=cast_horizontal,
+                         cast_vertical=cast_vertical,
                          fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
 except ValueError as ex:
     st.error(str(ex))
