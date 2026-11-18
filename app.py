@@ -8,6 +8,8 @@ at the showroom background's native dimensions with 200-DPI metadata.
 from __future__ import annotations
 
 import hashlib
+import importlib
+import inspect
 import io
 import json
 import math
@@ -16,7 +18,39 @@ import zipfile
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
-from shadow_engine import render_showroom_shadows
+import shadow_engine
+
+def render_showroom_shadows(*args, **kwargs):
+    """Refresh renderer if Streamlit kept an older module after a GitHub update.
+
+    Streamlit may hot-reload app.py without reloading already-imported
+    shadow_engine.py. If the app passes newly added shadow controls to that
+    stale renderer, Python raises TypeError: unexpected keyword argument.
+    Reload the module and, during rolling deployments only, retain an
+    older-compatible shadow preview rather than crashing the whole app.
+    """
+    renderer = shadow_engine.render_showroom_shadows
+    missing = set(kwargs) - set(inspect.signature(renderer).parameters)
+    if missing:
+        importlib.invalidate_caches()
+        renderer = importlib.reload(shadow_engine).render_showroom_shadows
+        missing = set(kwargs) - set(inspect.signature(renderer).parameters)
+    optional_new_controls = {"tyre_contact_darkness", "tyre_contact_size"}
+    if missing:
+        if not missing.issubset(optional_new_controls):
+            raise RuntimeError(
+                "Shadow renderer version mismatch: missing arguments "
+                + ", ".join(sorted(missing))
+                + ". Please reboot this Streamlit app."
+            )
+        st.warning(
+            "The newest tyre-shadow controls are still loading on the server. "
+            "The previous shadow renderer is being used temporarily. "
+            "Reboot the app in Manage app if this message persists."
+        )
+        kwargs = {key: value for key, value in kwargs.items() if key not in missing}
+    return renderer(*args, **kwargs)
+
 
 st.set_page_config(page_title="Jaffes Ford Vehicle Studio", page_icon="🚘", layout="wide")
 
@@ -713,7 +747,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 2.3 · Darker refined tyre-contact shadows, OpenCV floor projection and approved placement presets")
+st.caption("Prototype 2.3.1 · Shadow-engine hot-reload compatibility fix and refined tyre contacts")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
