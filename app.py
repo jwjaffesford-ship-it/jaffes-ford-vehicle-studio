@@ -76,6 +76,7 @@ TEMPLATE_ANGLES = [
 # Approved settings use fixed field names and validated numeric slider bounds.
 # No vehicle photo, master background or personal data is stored in preset JSON.
 PRESET_OPTIONAL_DEFAULTS = {
+    "hidden_wheelbase_slider": 95,
     "hidden_wheel_blend_slider": 55,
     "chassis_density_slider": 115,
     "hidden_wheel_shadows_checkbox": True,
@@ -98,6 +99,7 @@ PRESET_OPTIONAL_DEFAULTS = {
 }
 
 PRESET_FIELDS = {
+    "hidden_wheelbase_slider": (70, 110, "int"),
     "hidden_wheel_blend_slider": (0, 150, "int"),
     "chassis_density_slider": (50, 200, "int"),
     "hidden_wheel_shadows_checkbox": (False, True, "bool"),
@@ -426,6 +428,32 @@ def tyre_shadow_points(vehicle: Image.Image, left: int, top: int,
     return points
 
 
+def infer_far_side_tyres(
+    visible_front: tuple[int, int], visible_rear: tuple[int, int],
+    vehicle_width: int, vehicle_height: int,
+    lateral_pct: int, floor_depth_pct: int, wheelbase_pct: int,
+) -> list[tuple[int, int]]:
+    """Infer hidden contacts as the *other ends of the same two axles*.
+
+    The near-side wheelbase is a perspective vector; the far-side wheelbase
+    stays parallel to it and is slightly foreshortened. This is not a 3D
+    reconstruction, and operators can still tune the camera-angle controls.
+    Unlike sampling a mask column, it cannot inadvertently attach the
+    far-side tyre to the bumper or the vehicle body.
+    """
+    fx, fy = visible_front
+    rx, ry = visible_rear
+    side_x = round(vehicle_width * lateral_pct / 100)
+    side_y = -round(vehicle_height * floor_depth_pct / 100)
+    far_front = (fx + side_x, fy + side_y)
+    perspective = wheelbase_pct / 100.0
+    far_rear = (
+        round(far_front[0] + perspective * (rx - fx)),
+        round(far_front[1] + perspective * (ry - fy)),
+    )
+    return [far_front, far_rear]
+
+
 def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            x_pct: int, ground_pct: int, opacity: int, softness: int, spread: float,
            left_tyre_pct: int, right_tyre_pct: int,
@@ -443,6 +471,7 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            hidden_wheel_shadows: bool = True,
            hidden_lateral_pct: int = -14,
            hidden_depth_pct: int = 12,
+           hidden_wheelbase_pct: int = 95,
            hidden_wheel_blend: int = 55,
            chassis_density: int = 115,
            fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
@@ -465,16 +494,14 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
         (shadow_points[1][0] + tyre_rear_x_nudge, shadow_points[1][1]),
     ]
     if hidden_wheel_shadows:
-        # Infer the two occluded wheel contacts from the VISIBLE wheel points.
-        # Sampling the silhouette at the hidden positions is misleading:
-        # those pixels may belong to bodywork, not the wheels.
-        dx = round(target_width * hidden_lateral_pct / 100)
-        dy = round(target_height * hidden_depth_pct / 100)
-        inferred = [
-            (shadow_points[0][0] + dx, shadow_points[0][1] - dy),
-            (shadow_points[1][0] + round(dx * 0.85),
-             shadow_points[1][1] - round(dy * 0.85)),
-        ]
+        # Hidden contacts follow the near-side front/rear AXLE geometry.
+        # Maintain a coherent perspective wheelbase rather than independently
+        # offsetting blue points onto arbitrary visible body pixels.
+        inferred = infer_far_side_tyres(
+            shadow_points[0], shadow_points[1],
+            target_width, target_height, hidden_lateral_pct,
+            hidden_depth_pct, hidden_wheelbase_pct,
+        )
         if extra_enabled:
             # Advanced manual overrides: floor height stays tied to inferred
             # geometry; the operator can refine each horizontal position.
@@ -669,19 +696,61 @@ def apply_suggested_placement(suggestion):
 
 
 def draw_shadow_points(image: Image.Image, points) -> Image.Image:
-    """Preview only: yellow visible contacts and blue inferred hidden contacts."""
+    """On the vehicle composite, label only visible tyres.
+
+    A hidden tyre's true floor-contact point can lie BEHIND an opaque body
+    panel in image space. Painting a blue marker ON TOP OF that panel is
+    misleading; use the separate floor-only diagnostic below instead.
+    """
     overlay = image.copy().convert("RGBA")
     draw = ImageDraw.Draw(overlay)
     radius = max(5, round(image.width / 250))
-    for i, (x, y) in enumerate(points):
-        hidden = i >= 2
-        colour = (15, 180, 255, 225) if hidden else (255, 200, 0, 225)
-        label = ("Hidden front" if i == 2 else "Hidden rear") if hidden else f"Visible {i + 1}"
+    for i, (x, y) in enumerate(points[:2], start=1):
         draw.ellipse((x-radius, y-radius, x+radius, y+radius),
-                     fill=colour, outline=(0, 0, 0, 255), width=2)
-        draw.text((x+radius+3, y-radius-3), label, fill=(0, 0, 0, 255),
+                     fill=(255, 200, 0, 225), outline=(0, 0, 0, 255), width=2)
+        draw.text((x+radius+3, y-radius-3), f"Visible {i}",
+                  fill=(0, 0, 0, 255), stroke_width=2,
+                  stroke_fill=(255, 255, 255, 255))
+    return overlay
+
+
+def draw_four_wheel_floor_diagram(
+    background: Image.Image, points: tuple[tuple[int, int], ...],
+) -> Image.Image:
+    """Show four wheel positions against the *empty floor* for calibration.
+
+    The inferred hidden contacts must not look like dots glued to the car;
+    the body is intentionally omitted in this diagnostic. All markers and
+    connector lines are preview-only and never included in downloaded images.
+    """
+    overlay = background.copy().convert("RGBA")
+    if len(points) < 4:
+        return overlay
+    near_front, near_rear, far_front, far_rear = points[:4]
+    shading = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+    painter = ImageDraw.Draw(shading)
+    painter.polygon(
+        [near_front, near_rear, far_rear, far_front],
+        fill=(30, 145, 200, 42),
+    )
+    overlay = Image.alpha_composite(overlay, shading)
+    draw = ImageDraw.Draw(overlay)
+    stroke = max(2, round(overlay.width / 800))
+    draw.line([near_front, near_rear], fill=(232, 166, 8, 240), width=stroke)
+    draw.line([far_front, far_rear], fill=(10, 125, 210, 240), width=stroke)
+    draw.line([near_front, far_front], fill=(65, 175, 170, 200), width=stroke)
+    draw.line([near_rear, far_rear], fill=(65, 175, 170, 200), width=stroke)
+    radius = max(5, round(overlay.width / 260))
+    for i, (x, y) in enumerate(points[:4]):
+        hidden = i >= 2
+        color = (15, 180, 255, 255) if hidden else (255, 200, 0, 255)
+        label = ("Hidden front" if i == 2 else "Hidden rear") if hidden else ("Visible front" if i == 0 else "Visible rear")
+        draw.ellipse((x-radius, y-radius, x+radius, y+radius),
+                     fill=color, outline=(0, 0, 0, 255), width=2)
+        draw.text((x+radius+5, y-radius-5), label, fill=(0, 0, 0, 255),
                   stroke_width=2, stroke_fill=(255, 255, 255, 255))
     return overlay
+
 
 def apply_front_30_shadow_preset():
     """A tested starting point for this Ranger 30-degree reference, not final QA."""
@@ -785,7 +854,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 2.5 · Photo-matched connected underbody shadows and subtle hidden-tyre support")
+st.caption("Prototype 2.6 · Axle-consistent hidden-wheel geometry and floor-only diagnostic preview")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -905,7 +974,7 @@ with st.sidebar:
             help="Moves only the contact shadow and marker, not the vehicle.",
         )
         show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False, key="shadow_marker_preview")
-        st.caption("Yellow = visible contact shadows; blue = inferred hidden tyre support for the continuous chassis shadow. No distinct blue-wheel patches are drawn or exported.")
+        st.caption("Yellow points appear on the composite. Hidden blue points may be occluded by the vehicle, so inspect them in the floor-only four-wheel diagram beneath the preview. No guides are exported.")
         hidden_wheel_shadows = st.checkbox(
             "Include shadows from the two hidden tyres", value=True,
             key="hidden_wheel_shadows_checkbox",
@@ -924,6 +993,12 @@ with st.sidebar:
             key="hidden_wheel_depth_slider",
             disabled=not hidden_wheel_shadows,
             help="Higher values project far-side tyre contacts farther up the showroom floor.",
+        )
+        hidden_wheelbase_pct = st.slider(
+            "Far-side wheelbase perspective (%)", 70, 110, 95, 1,
+            key="hidden_wheelbase_slider",
+            disabled=not hidden_wheel_shadows,
+            help="Links front and rear hidden contacts to the same axle geometry. 100% keeps exactly parallel, equal-length wheelbase vectors; below 100% gives distance foreshortening.",
         )
         hidden_wheel_blend = st.slider(
             "Hidden-wheel shadow blend into chassis (%)", 0, 150, 55, 5,
@@ -1072,6 +1147,7 @@ try:
                          hidden_wheel_shadows=hidden_wheel_shadows,
                          hidden_lateral_pct=hidden_lateral,
                          hidden_depth_pct=hidden_depth,
+                         hidden_wheelbase_pct=hidden_wheelbase_pct,
                          hidden_wheel_blend=hidden_wheel_blend,
                          chassis_density=chassis_density,
                          fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
@@ -1110,6 +1186,17 @@ with right_col:
         preview = draw_shadow_points(preview, shadow_points)
     st.image(preview, use_container_width=True)
     st.caption("Reference/template and red crop guides are preview-only. They are NEVER included in the final download.")
+    if show_shadow_points and len(shadow_points) >= 4:
+        with st.expander("Inspect four-wheel floor footprint (vehicle hidden)", expanded=False):
+            st.image(
+                draw_four_wheel_floor_diagram(background, shadow_points),
+                use_container_width=True,
+            )
+            st.caption(
+                "Yellow = visible wheel floor contacts; blue = inferred hidden contacts. "
+                "The body is hidden so the relationship between the two axles is visible. "
+                "The floor geometry is estimated from a photo, not an exact 3D survey."
+            )
 
 if reference is not None:
     guide_box_for_check, roof_line_for_check = estimate_template_guides(
