@@ -95,6 +95,20 @@ def render_showroom_shadows(
             under, [polygon],
             min(180, round(base * (underbody_strength / 100.0) * 0.75)),
         )
+        # Hidden tyres do not disappear because the camera cannot see them.
+        # Four contact points describe a projected floor footprint, connecting
+        # front/rear and near/far wheels in perspective. This is an inferred
+        # 2.5D approximation, not verified vehicle geometry.
+        if len(tyre_points) >= 4:
+            near_front, near_rear, far_front, far_rear = tyre_points[:4]
+            footprint = np.array(
+                [near_front, near_rear, far_rear, far_front],
+                dtype=np.int32,
+            )
+            cv2.fillConvexPoly(
+                under, footprint,
+                min(170, round(base * (underbody_strength / 100.0) * 0.67)),
+            )
         under = cv2.GaussianBlur(
             under, (0, 0), sigmaX=max(5.0, blur * 1.25),
             sigmaY=max(4.0, blur * 0.85),
@@ -117,7 +131,7 @@ def render_showroom_shadows(
         for i, (x, y) in enumerate(tyre_points):
             # Extra, partly hidden wheels are fainter; never assume their
             # ground point is as certain as the two user-selected contacts.
-            relative = 1.0 if i < 2 else 0.55
+            relative = 1.0 if i < 2 else 0.42
             rx = max(3, round(vw * rx_fraction * footprint_scale))
             ry = max(2, round(vw * ry_fraction * footprint_scale))
             cv2.ellipse(
