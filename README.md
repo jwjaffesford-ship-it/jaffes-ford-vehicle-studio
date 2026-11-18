@@ -118,3 +118,38 @@ The inferred far-side wheel positions are not physically measured and will
 need calibration per template angle. Existing placement presets are compatible
 and default to four-wheel shadows when the new settings are absent. Your
 approved vehicle crop, scale and roofline are unchanged by this update.
+
+## Photo-reference shadow refinement (Version 2.5)
+
+Based on visual comparison of the real grey Ranger showroom photo, the Ford
+cropping template and the previous studio composite, the floor shadow now
+behaves as a **continuous weight-bearing vehicle footprint** rather than four
+separate dark circles.
+
+- The two visible tyres retain concentrated, defined contact shadows.
+- The two hidden tyres **still contribute**, but only by shaping a softly
+  blurred quadrilateral between front/rear and near/far contact points. No
+  independent high-contrast circles are drawn at the blue hidden-wheel markers.
+- A front-weighted, softly blurred longitudinal mid-chassis band connects
+  the engine/front bumper area, cabin and side step, tapering into the rear.
+- The user-approved vehicle scale, roofline, crop, position and original
+  showroom background remain unchanged.
+
+New settings:
+- **Front and mid-chassis shadow fullness (%)**, default 115. Increase
+  moderately if too little shade appears along the middle or front underside.
+- **Hidden-wheel shadow blend into chassis (%)**, default 55. Increase it for
+  gentle far-side weight; decrease it if the underbody becomes too dark.
+- Previously available visible tyre contact darkness/size and the inferred
+  hidden-wheel perspective controls are unchanged.
+
+Starting guidance for the tested front 30-degree Ranger: visible tyre contact
+darkness around 150%, whole-vehicle underbody strength 100–115%, chassis
+fullness 110–125%, hidden-wheel blend 45–65%. These are editorial starting
+values rather than physically measured shadows. The app estimates geometry
+from 2D images and requires final human visual review.
+
+Old JSON presets still import: new fields receive defaults, and saving an
+angle again plus downloading a new backup preserves the updated values.
+Check that hidden-wheel support markers (blue) are roughly below the chassis,
+even though no separate blue-marker patches should appear on the floor.
