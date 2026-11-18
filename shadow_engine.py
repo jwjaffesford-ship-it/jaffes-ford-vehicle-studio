@@ -23,6 +23,8 @@ def render_showroom_shadows(
     cast_vertical: int = -35,
     tyre_contact_darkness: int = 150,
     tyre_contact_size: int = 100,
+    hidden_wheel_blend: int = 55,
+    chassis_density: int = 115,
 ) -> Image.Image:
     """Render soft projected car silhouette, broad chassis and focused wheel contacts.
 
@@ -79,10 +81,13 @@ def render_showroom_shadows(
         layers.append(cast)
 
     if underbody_strength > 0:
-        # Broad polygon covers both front and rear underside, not just a line
-        # connecting two tyres.
+        # Main chassis shadow is one continuous, perspective-shaped mass.
+        # The 2D photograph does not provide actual suspension or floor-depth
+        # geometry: this is a controlled approximation grounded by the two
+        # visible wheel contacts.
+        main_alpha = min(185, round(base * (underbody_strength / 100.0) * 0.68))
         under = np.zeros((bh, bw), dtype=np.uint8)
-        depth = round(vw * 0.07 * width_factor * depth_factor)
+        depth = max(5, round(vw * 0.07 * width_factor * depth_factor))
         polygon = np.array([
             [body_front_x, body_front_y],
             [xnear, ynear + round(vh * 0.014)],
@@ -91,35 +96,83 @@ def render_showroom_shadows(
             [left + round(vw * 0.64), yrear - depth - round(vh * 0.05)],
             [left + round(vw * 0.20), back_front_y - round(depth * 0.55)],
         ], dtype=np.int32)
-        cv2.fillPoly(
-            under, [polygon],
-            min(180, round(base * (underbody_strength / 100.0) * 0.75)),
+        cv2.fillPoly(under, [polygon], main_alpha)
+        under = cv2.GaussianBlur(
+            under, (0, 0), sigmaX=max(6.0, blur * 1.30),
+            sigmaY=max(5.0, blur * 0.92),
         )
-        # Hidden tyres do not disappear because the camera cannot see them.
-        # Four contact points describe a projected floor footprint, connecting
-        # front/rear and near/far wheels in perspective. This is an inferred
-        # 2.5D approximation, not verified vehicle geometry.
-        if len(tyre_points) >= 4:
+        layers.append(under)
+
+        # A connected mid-chassis penumbra fills the dark region beneath the
+        # engine, cabin and side step. It softly tapers toward the rear axle.
+        # This deliberately avoids making a detached oval under the bumper.
+        spine = np.zeros((bh, bw), dtype=np.uint8)
+        mid_front = (
+            left + round(vw * 0.16),
+            ynear - round(vh * 0.080),
+        )
+        mid_rear = (
+            left + round(vw * 0.82),
+            yrear - round(vh * 0.070),
+        )
+        chassis_factor = max(0.0, min(2.0, chassis_density / 100.0))
+        cv2.line(
+            spine, mid_front, mid_rear,
+            color=min(145, round(main_alpha * 0.45 * chassis_factor)),
+            thickness=max(14, round(vw * 0.125 * width_factor)),
+            lineType=cv2.LINE_AA,
+        )
+        # Stronger engine/front underside, integrated with the continuous
+        # chassis spine rather than a separate sharp contact spot.
+        cv2.ellipse(
+            spine,
+            (left + round(vw * 0.27), ynear - round(vh * 0.09)),
+            (max(12, round(vw * 0.15)), max(6, round(vw * 0.044))),
+            0, 0, 360,
+            min(148, round(main_alpha * 0.48 * chassis_factor)),
+            -1,
+        )
+        spine = cv2.GaussianBlur(
+            spine, (0, 0),
+            sigmaX=max(8.0, blur * 1.28),
+            sigmaY=max(5.0, blur * 0.82),
+        )
+        layers.append(spine)
+
+        if len(tyre_points) >= 4 and hidden_wheel_blend > 0:
+            # Both hidden wheels affect the support footprint but do not make
+            # independent black circles. A softened quadrilateral stretches
+            # continuously between the four tyre contact points, with a faint
+            # far-side longitudinal contribution. The unseen wheels are
+            # estimated (not reconstructed from actual 3D geometry).
             near_front, near_rear, far_front, far_rear = tyre_points[:4]
             footprint = np.array(
                 [near_front, near_rear, far_rear, far_front],
                 dtype=np.int32,
             )
-            cv2.fillConvexPoly(
-                under, footprint,
-                min(170, round(base * (underbody_strength / 100.0) * 0.67)),
+            far_support = np.zeros((bh, bw), dtype=np.uint8)
+            blend = max(0.0, min(1.5, hidden_wheel_blend / 100.0))
+            support_alpha = min(120, round(main_alpha * 0.52 * blend))
+            cv2.fillConvexPoly(far_support, footprint, support_alpha)
+            cv2.line(
+                far_support, far_front, far_rear,
+                min(140, round(main_alpha * 0.48 * blend)),
+                max(9, round(vw * 0.055 * width_factor)),
+                cv2.LINE_AA,
             )
-        under = cv2.GaussianBlur(
-            under, (0, 0), sigmaX=max(5.0, blur * 1.25),
-            sigmaY=max(4.0, blur * 0.85),
-        )
-        layers.append(under)
+            far_support = cv2.GaussianBlur(
+                far_support, (0, 0),
+                sigmaX=max(10.0, blur * 1.8),
+                sigmaY=max(8.0, blur * 1.35),
+            )
+            layers.append(far_support)
 
     # Dense, correctly grounded tyre shadows: three DIFFERENT spatial scales.
     # Broad penumbra is soft, medium-scale tyre contact is defined, and the
     # small dark core attaches the rubber to the floor. These are ground
     # ellipses (not black patches on the body), controlled separately from the
-    # diffuse whole-car shadow. All tyre points use the same coherent layers.
+    # diffuse whole-car shadow. Only VISIBLE tyre contacts get dense cores;
+    # the hidden tyres contribute through the broad softened chassis footprint.
     contact_factor = (base / 110.0) * (tyre_contact_darkness / 100.0)
     footprint_scale = (tyre_contact_size / 100.0) * width_factor
 
@@ -128,10 +181,10 @@ def render_showroom_shadows(
         alpha: float, sigma_x: float, sigma_y: float,
     ) -> np.ndarray:
         mask = np.zeros((bh, bw), dtype=np.uint8)
-        for i, (x, y) in enumerate(tyre_points):
-            # Extra, partly hidden wheels are fainter; never assume their
-            # ground point is as certain as the two user-selected contacts.
-            relative = 1.0 if i < 2 else 0.42
+        for x, y in tyre_points[:2]:
+            # Hidden tyres are deliberately EXCLUDED from contact ellipses.
+            # Their shadow belongs in the continuous far-side floor footprint.
+            relative = 1.0
             rx = max(3, round(vw * rx_fraction * footprint_scale))
             ry = max(2, round(vw * ry_fraction * footprint_scale))
             cv2.ellipse(
