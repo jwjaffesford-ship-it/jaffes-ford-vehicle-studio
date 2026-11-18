@@ -73,6 +73,9 @@ TEMPLATE_ANGLES = [
 # Approved settings use fixed field names and validated numeric slider bounds.
 # No vehicle photo, master background or personal data is stored in preset JSON.
 PRESET_OPTIONAL_DEFAULTS = {
+    "hidden_wheel_shadows_checkbox": True,
+    "hidden_wheel_lateral_slider": -14,
+    "hidden_wheel_depth_slider": 12,
     "tyre_contact_darkness_slider": 150,
     "tyre_contact_size_slider": 100,
     "tyre_front_x_nudge": 0,
@@ -90,6 +93,9 @@ PRESET_OPTIONAL_DEFAULTS = {
 }
 
 PRESET_FIELDS = {
+    "hidden_wheel_shadows_checkbox": (False, True, "bool"),
+    "hidden_wheel_lateral_slider": (-35, 35, "int"),
+    "hidden_wheel_depth_slider": (0, 30, "int"),
     "tyre_contact_darkness_slider": (50, 220, "int"),
     "tyre_contact_size_slider": (60, 160, "int"),
     "tyre_front_x_nudge": (-50, 50, "int"),
@@ -427,6 +433,9 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            tyre_contact_size: int = 100,
            tyre_front_x_nudge: int = 0,
            tyre_rear_x_nudge: int = 0,
+           hidden_wheel_shadows: bool = True,
+           hidden_lateral_pct: int = -14,
+           hidden_depth_pct: int = 12,
            fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
@@ -446,11 +455,27 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
         (shadow_points[0][0] + tyre_front_x_nudge, shadow_points[0][1]),
         (shadow_points[1][0] + tyre_rear_x_nudge, shadow_points[1][1]),
     ]
-    if extra_enabled:
-        shadow_points += tyre_shadow_points(
-            vehicle, left, top, (extra_rear_frac, extra_far_frac),
-            (extra_rear_y, extra_far_y),
-        )
+    if hidden_wheel_shadows:
+        # Infer the two occluded wheel contacts from the VISIBLE wheel points.
+        # Sampling the silhouette at the hidden positions is misleading:
+        # those pixels may belong to bodywork, not the wheels.
+        dx = round(target_width * hidden_lateral_pct / 100)
+        dy = round(target_height * hidden_depth_pct / 100)
+        inferred = [
+            (shadow_points[0][0] + dx, shadow_points[0][1] - dy),
+            (shadow_points[1][0] + round(dx * 0.85),
+             shadow_points[1][1] - round(dy * 0.85)),
+        ]
+        if extra_enabled:
+            # Advanced manual overrides: floor height stays tied to inferred
+            # geometry; the operator can refine each horizontal position.
+            inferred = [
+                (left + round(target_width * extra_rear_frac),
+                 inferred[0][1] + extra_rear_y),
+                (left + round(target_width * extra_far_frac),
+                 inferred[1][1] + extra_far_y),
+            ]
+        shadow_points.extend(inferred)
     composited = render_showroom_shadows(
         background, vehicle, left, top, shadow_points,
         strength=opacity, softness=softness, width_factor=spread,
@@ -633,17 +658,19 @@ def apply_suggested_placement(suggestion):
 
 
 def draw_shadow_points(image: Image.Image, points) -> Image.Image:
-    """Preview only: display exact coordinates where shadow anchor patches are placed."""
+    """Preview only: yellow visible contacts and blue inferred hidden contacts."""
     overlay = image.copy().convert("RGBA")
     draw = ImageDraw.Draw(overlay)
     radius = max(5, round(image.width / 250))
-    for i, (x, y) in enumerate(points, start=1):
+    for i, (x, y) in enumerate(points):
+        hidden = i >= 2
+        colour = (15, 180, 255, 225) if hidden else (255, 200, 0, 225)
+        label = ("Hidden front" if i == 2 else "Hidden rear") if hidden else f"Visible {i + 1}"
         draw.ellipse((x-radius, y-radius, x+radius, y+radius),
-                     fill=(255, 200, 0, 215), outline=(0, 0, 0, 255), width=2)
-        draw.text((x+radius+3, y-radius-3), f"Tyre {i}", fill=(0, 0, 0, 255),
+                     fill=colour, outline=(0, 0, 0, 255), width=2)
+        draw.text((x+radius+3, y-radius-3), label, fill=(0, 0, 0, 255),
                   stroke_width=2, stroke_fill=(255, 255, 255, 255))
     return overlay
-
 
 def apply_front_30_shadow_preset():
     """A tested starting point for this Ranger 30-degree reference, not final QA."""
@@ -747,7 +774,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 2.3.1 · Shadow-engine hot-reload compatibility fix and refined tyre contacts")
+st.caption("Prototype 2.4 · Four-wheel floor-shadow footprint with inferred hidden tyre contacts")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -862,31 +889,52 @@ with st.sidebar:
             help="Moves only the contact shadow and marker, not the vehicle.",
         )
         show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False, key="shadow_marker_preview")
-        extra_enabled = st.checkbox(
-            "Add two more tyre contact shadows (optional)", value=False,
-            key="extra_tyres_checkbox",
-            help="For the wheels that do not yet have a contact shadow. Check their markers and adjust carefully.",
+        st.caption("Yellow markers = visible tyres. Blue markers = inferred hidden tyres. Markers never appear in exports.")
+        hidden_wheel_shadows = st.checkbox(
+            "Include shadows from the two hidden tyres", value=True,
+            key="hidden_wheel_shadows_checkbox",
+            help="Treats the vehicle as having four wheels even when only two are visible. Hidden contact positions are inferred and shadows are subtler.",
         )
-        st.caption("Additional tyre contacts (optional; enable checkbox above)")
+        hidden_lateral = st.slider(
+            "Hidden-wheel sideways perspective (% of vehicle width)",
+            -35, 35, -14, 1,
+            key="hidden_wheel_lateral_slider",
+            disabled=not hidden_wheel_shadows,
+            help="Negative projects hidden tyres left, positive right. Match the camera angle.",
+        )
+        hidden_depth = st.slider(
+            "Hidden-wheel floor depth (% of vehicle height)",
+            0, 30, 12, 1,
+            key="hidden_wheel_depth_slider",
+            disabled=not hidden_wheel_shadows,
+            help="Higher values project far-side tyre contacts farther up the showroom floor.",
+        )
+        extra_enabled = st.checkbox(
+            "Manually override inferred hidden-wheel positions", value=False,
+            key="extra_tyres_checkbox",
+            disabled=not hidden_wheel_shadows,
+            help="Advanced override only; usually leave unticked and let the program infer both unseen wheels.",
+        )
+        st.caption("Hidden-wheel manual overrides (normally leave disabled)")
         rear_extra_x = st.slider(
             "Additional tyre 3 horizontal position (%)", 5, 95, 13, 1,
             key="extra_tyre_rear_pct",
-            disabled=not extra_enabled,
+            disabled=not (hidden_wheel_shadows and extra_enabled),
         )
         far_extra_x = st.slider(
             "Additional tyre 4 horizontal position (%)", 5, 95, 75, 1,
             key="extra_tyre_far_pct",
-            disabled=not extra_enabled,
+            disabled=not (hidden_wheel_shadows and extra_enabled),
         )
         rear_extra_y = st.slider(
             "Additional tyre 3 vertical offset (pixels)", -80, 80, 0, 1,
             key="extra_tyre_rear_y",
-            disabled=not extra_enabled,
+            disabled=not (hidden_wheel_shadows and extra_enabled),
         )
         far_extra_y = st.slider(
             "Additional tyre 4 vertical offset (pixels)", -80, 80, -10, 1,
             key="extra_tyre_far_y",
-            disabled=not extra_enabled,
+            disabled=not (hidden_wheel_shadows and extra_enabled),
         )
         if angle_label == "Front 30° — view 2":
             st.button(
@@ -999,6 +1047,9 @@ try:
                          tyre_contact_size=tyre_contact_size,
                          tyre_front_x_nudge=tyre_front_x_nudge,
                          tyre_rear_x_nudge=tyre_rear_x_nudge,
+                         hidden_wheel_shadows=hidden_wheel_shadows,
+                         hidden_lateral_pct=hidden_lateral,
+                         hidden_depth_pct=hidden_depth,
                          fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
 except ValueError as ex:
     st.error(str(ex))
