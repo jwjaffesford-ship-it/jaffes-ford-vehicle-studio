@@ -62,3 +62,30 @@ The **4 · Floor shadow** panel now has:
 The underbody is a perspective-aware photographic approximation based on the known tyre contact positions. Review the floor under both axles and the chassis, because accurate photographic shadow direction requires user inspection. Every shadow is composited behind the uploaded original vehicle and over the fixed original showroom image, never into the vehicle pixels. The red roofline/crop guide and yellow marker labels remain preview-only. The program does not change the approved vehicle's scale, angle, or position when any shadow control is moved.
 
 Previously downloaded Version 1.9 preset JSON files still import. New shadow controls receive defaults when importing old presets. After fine-tuning shadows, save the placement again and download a new JSON backup.
+
+## Focused tyre-contact shadows (Version 2.3)
+
+The underbody and cast-shadow engine stays the same, but each selected tyre now receives
+**three distinct shadow components**: a broad, lightly blurred halo, a darker
+medium-size patch and a small, sharply defined contact core exactly around the
+wheel's estimated floor contact. The vehicle's colour, scale, crop and alignment
+are untouched.
+
+Under **4 · Floor shadow**, use the new **Tyre contact darkness (%)** slider
+(default 150%) to strengthen wheel contacts independently of the full-body
+shadow, and **Tyre contact footprint size (%)** (default 100%) to match the
+shadow width to the tyre size. Under **Tyre contact positions (optional)**,
+there are now independent **Tyre 1 contact fine left/right (pixels)** and
+**Tyre 2 contact fine left/right (pixels)** controls. Use the existing vertical
+offsets together with **Show tyre-shadow points on preview** to place each
+marker where rubber really meets the tiles. These marker positions are only
+visible in the preview; the clean 200-DPI PNG has no markers or guides.
+
+Suggested starting values for the tested Ranger angle: general Shadow strength
+100–110, softness 25–30 pixels, tyre contact darkness 145–165%, tyre contact
+footprint size 90–105%. Verify both contacts before saving as approved; overly
+high settings can produce unnatural dark spots.
+
+Existing JSON placement backups from earlier versions remain importable:
+all new wheel-shadow values receive safe defaults when missing. To keep the
+new values, re-save the angle and download an updated preset JSON file.
