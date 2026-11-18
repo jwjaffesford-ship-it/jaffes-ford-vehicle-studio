@@ -153,3 +153,36 @@ Old JSON presets still import: new fields receive defaults, and saving an
 angle again plus downloading a new backup preserves the updated values.
 Check that hidden-wheel support markers (blue) are roughly below the chassis,
 even though no separate blue-marker patches should appear on the floor.
+
+## Coherent hidden-wheel geometry and floor-only inspection (Version 2.6)
+
+After visual review of the front 30-degree Ranger composite, the previous
+hidden-wheel blue markers were misleading when drawn on top of the vehicle
+body. A hidden tyre's contact location can be completely occluded by a door,
+bumper or chassis in camera space even though its supporting ground shadow
+belongs beneath the car.
+
+**New behaviour**
+- The two near-side visible tyre contacts remain anchored to the cut-out mask
+  and can be adjusted independently as before.
+- The far-side front tyre is inferred by a sideways-and-depth *axle* offset
+  from the visible front tyre.
+- The far-side rear tyre is derived from the far-side front contact using the
+  observed near-side wheelbase vector, multiplied by **Far-side wheelbase
+  perspective (%)** (default **95%**, range 70–110). This keeps both wheelbase
+  vectors parallel, with a small amount of perspective foreshortening.
+- The main composite shows only the **yellow markers for visible tyre contacts**,
+  avoiding misleading blue markers drawn on top of body panels.
+- With **Show tyre-shadow points on preview** enabled, expand **Inspect four-wheel
+  floor footprint (vehicle hidden)** underneath the composite. This shows the
+  full quadrilateral on the *blank showroom floor*: yellow visible tyre contacts,
+  blue inferred hidden tyre supports, and connecting front/rear axle guide lines.
+- The full four-wheel footprint still contributes to the connected underbody
+  shading; dense local tyre shadows remain limited to the two visible tyres.
+- Approved vehicle size, crop, roofline and placement do not move. Existing JSON
+  presets still import; the new wheelbase setting defaults to 95%. Re-save the
+  preset and download a new backup after calibrating the selected angle.
+
+This remains an approximate 2.5D projection from a single vehicle photo, not
+measured 3D wheel coordinates. Per-angle visual inspection against approved Ford
+reference shots is still needed for accurate grounding.
