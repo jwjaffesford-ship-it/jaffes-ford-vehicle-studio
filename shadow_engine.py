@@ -21,8 +21,10 @@ def render_showroom_shadows(
     cast_strength: int = 60,
     cast_horizontal: int = -35,
     cast_vertical: int = -35,
+    tyre_contact_darkness: int = 150,
+    tyre_contact_size: int = 100,
 ) -> Image.Image:
-    """Render soft projected vehicle silhouette + broad underbody + tyre contacts.
+    """Render soft projected car silhouette, broad chassis and focused wheel contacts.
 
     Uses a 2.5D perspective approximation, not physical 3D lighting. Shadows
     are placed under the original cut-out without modifying showroom or car RGB.
@@ -99,20 +101,49 @@ def render_showroom_shadows(
         )
         layers.append(under)
 
-    for i, (x, y) in enumerate(tyre_points):
-        contact = np.zeros((bh, bw), dtype=np.uint8)
-        wheel_strength = 1.0 if i < 2 else 0.65
-        rx = max(6, round(vw * 0.043 * width_factor))
-        ry = max(3, round(vw * 0.010 * width_factor))
-        cv2.ellipse(
-            contact, (int(x), int(y)), (rx, ry), 0, 0, 360,
-            min(230, round(base * 1.15 * wheel_strength)), -1,
+    # Dense, correctly grounded tyre shadows: three DIFFERENT spatial scales.
+    # Broad penumbra is soft, medium-scale tyre contact is defined, and the
+    # small dark core attaches the rubber to the floor. These are ground
+    # ellipses (not black patches on the body), controlled separately from the
+    # diffuse whole-car shadow. All tyre points use the same coherent layers.
+    contact_factor = (base / 110.0) * (tyre_contact_darkness / 100.0)
+    footprint_scale = (tyre_contact_size / 100.0) * width_factor
+
+    def contact_mask(
+        rx_fraction: float, ry_fraction: float,
+        alpha: float, sigma_x: float, sigma_y: float,
+    ) -> np.ndarray:
+        mask = np.zeros((bh, bw), dtype=np.uint8)
+        for i, (x, y) in enumerate(tyre_points):
+            # Extra, partly hidden wheels are fainter; never assume their
+            # ground point is as certain as the two user-selected contacts.
+            relative = 1.0 if i < 2 else 0.55
+            rx = max(3, round(vw * rx_fraction * footprint_scale))
+            ry = max(2, round(vw * ry_fraction * footprint_scale))
+            cv2.ellipse(
+                mask, (int(x), int(y)), (rx, ry), 0, 0, 360,
+                min(238, round(alpha * contact_factor * relative)), -1,
+            )
+        return cv2.GaussianBlur(
+            mask, (0, 0), sigmaX=max(0.7, sigma_x),
+            sigmaY=max(0.7, sigma_y),
         )
-        contact = cv2.GaussianBlur(
-            contact, (0, 0), sigmaX=max(2.0, blur * 0.28),
-            sigmaY=max(1.0, blur * 0.18),
-        )
-        layers.append(contact)
+
+    # Small halos make the floor feel continuous around the rubber.
+    layers.append(contact_mask(
+        0.059, 0.018, 46,
+        max(4.0, blur * 0.44), max(2.0, blur * 0.20),
+    ))
+    # Mid-scale shadow is defined enough to reveal actual tyre contact.
+    layers.append(contact_mask(
+        0.034, 0.009, 94,
+        max(2.0, blur * 0.16), max(1.0, blur * 0.075),
+    ))
+    # Darkest core sits very close to the bottom of each actual tyre.
+    layers.append(contact_mask(
+        0.018, 0.005, 118,
+        max(1.0, blur * 0.065), max(0.8, blur * 0.035),
+    ))
 
     # Charcoal-grey shadows are blended separately on the untouched background.
     for mask in layers:
