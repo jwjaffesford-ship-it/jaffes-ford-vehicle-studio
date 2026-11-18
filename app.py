@@ -39,6 +39,10 @@ TEMPLATE_ANGLES = [
 # Approved settings use fixed field names and validated numeric slider bounds.
 # No vehicle photo, master background or personal data is stored in preset JSON.
 PRESET_OPTIONAL_DEFAULTS = {
+    "tyre_contact_darkness_slider": 150,
+    "tyre_contact_size_slider": 100,
+    "tyre_front_x_nudge": 0,
+    "tyre_rear_x_nudge": 0,
     "cast_strength_slider": 75,
     "cast_horizontal_slider": -50,
     "cast_vertical_slider": -40,
@@ -52,6 +56,10 @@ PRESET_OPTIONAL_DEFAULTS = {
 }
 
 PRESET_FIELDS = {
+    "tyre_contact_darkness_slider": (50, 220, "int"),
+    "tyre_contact_size_slider": (60, 160, "int"),
+    "tyre_front_x_nudge": (-50, 50, "int"),
+    "tyre_rear_x_nudge": (-50, 50, "int"),
     "cast_strength_slider": (0, 150, "int"),
     "cast_horizontal_slider": (-180, 180, "int"),
     "cast_vertical_slider": (-180, 180, "int"),
@@ -381,6 +389,10 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
            extra_rear_y: int = 0, extra_far_y: int = -10,
            cast_strength: int = 75, cast_horizontal: int = -50,
            cast_vertical: int = -40,
+           tyre_contact_darkness: int = 150,
+           tyre_contact_size: int = 100,
+           tyre_front_x_nudge: int = 0,
+           tyre_rear_x_nudge: int = 0,
            fine_x: int = 0, fine_y: int = 0, fine_scale: float = 1.0):
     vehicle = crop_to_alpha(vehicle)
     bw, bh = background.size
@@ -394,6 +406,12 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
         vehicle, left, top, (left_tyre_pct / 100, right_tyre_pct / 100),
         (left_tyre_y, right_tyre_y),
     )
+    # Independent fine adjustment corrects the contact patch WITHOUT moving
+    # the approved vehicle or changing the stored reference placement.
+    shadow_points = [
+        (shadow_points[0][0] + tyre_front_x_nudge, shadow_points[0][1]),
+        (shadow_points[1][0] + tyre_rear_x_nudge, shadow_points[1][1]),
+    ]
     if extra_enabled:
         shadow_points += tyre_shadow_points(
             vehicle, left, top, (extra_rear_frac, extra_far_frac),
@@ -405,24 +423,17 @@ def render(background: Image.Image, vehicle: Image.Image, size_pct: int,
         underbody_strength=body_strength, underbody_depth=body_depth,
         cast_strength=cast_strength, cast_horizontal=cast_horizontal,
         cast_vertical=cast_vertical,
+        tyre_contact_darkness=tyre_contact_darkness,
+        tyre_contact_size=tyre_contact_size,
     )
     # Put original vehicle pixels above the shadows; preserve translucent edges.
     vehicle_layer = Image.new("RGBA", composited.size, (0, 0, 0, 0))
     vehicle_layer.paste(vehicle, (left, top))
     composited = Image.alpha_composite(composited, vehicle_layer)
     fits = (left >= 0 and top >= 0 and left + target_width <= bw and top + target_height <= bh)
-    anchor_points = tyre_shadow_points(
-        vehicle, left, top, (left_tyre_pct / 100, right_tyre_pct / 100),
-        (left_tyre_y, right_tyre_y),
-    )
-    if extra_enabled:
-        anchor_points += tyre_shadow_points(
-            vehicle, left, top, (extra_rear_frac, extra_far_frac),
-            (extra_rear_y, extra_far_y),
-        )
     return composited, fits, (
         left, top, left + target_width, top + target_height
-    ), tuple(anchor_points)
+    ), tuple(shadow_points)
 
 
 @st.cache_data(show_spinner=False, max_entries=6)
@@ -702,7 +713,7 @@ def crop_guide(image: Image.Image) -> Image.Image:
 
 st.session_state.setdefault("approved_angle_presets", {})
 st.title("Jaffes Ford Vehicle Studio")
-st.caption("Prototype 2.2 · OpenCV perspective-projected shadows, full underbody shading and saved placements")
+st.caption("Prototype 2.3 · Darker refined tyre-contact shadows, OpenCV floor projection and approved placement presets")
 st.info("Upload your **actual Ford showroom background**. This app never invents or replaces it.")
 
 with st.sidebar:
@@ -762,6 +773,17 @@ with st.sidebar:
     opacity = st.slider("Shadow strength", 0, 220, 80, key="shadow_opacity_slider")
     softness = st.slider("Shadow softness (pixels)", 0, 90, 18, key="shadow_softness_slider")
     spread = st.slider("Shadow width", 0.5, 1.5, 0.85, 0.05, key="shadow_spread_slider")
+    st.caption("Tyre contact is separate from the soft full-length underbody shadow.")
+    tyre_contact_darkness = st.slider(
+        "Tyre contact darkness (%)", 50, 220, 150, 5,
+        key="tyre_contact_darkness_slider",
+        help="Darkens the small tyre-to-tile contact region without changing the overall showroom or vehicle.",
+    )
+    tyre_contact_size = st.slider(
+        "Tyre contact footprint size (%)", 60, 160, 100, 5,
+        key="tyre_contact_size_slider",
+        help="Controls the width of the tyre contact patch. Keep close to the actual tyre width.",
+    )
     st.caption("Underbody shadow: a soft floor shadow along the whole chassis, separate from tyre contact patches.")
     body_strength = st.slider(
         "Whole-vehicle underbody shadow (%)", 0, 200, 85, 5,
@@ -795,6 +817,16 @@ with st.sidebar:
         right_tyre_pct = st.slider("Right tyre position (% of cut-out width)", 5, 95, 87, key="tyre_rear_pos")
         left_tyre_y = st.slider("Tyre 1 shadow vertical offset (pixels)", -50, 50, 0, 1, key="tyre_front_y")
         right_tyre_y = st.slider("Tyre 2 shadow vertical offset (pixels)", -50, 50, 0, 1, key="tyre_rear_y")
+        tyre_front_x_nudge = st.slider(
+            "Tyre 1 contact fine left/right (pixels)", -50, 50, 0, 1,
+            key="tyre_front_x_nudge",
+            help="Moves only the contact shadow and marker, not the vehicle.",
+        )
+        tyre_rear_x_nudge = st.slider(
+            "Tyre 2 contact fine left/right (pixels)", -50, 50, 0, 1,
+            key="tyre_rear_x_nudge",
+            help="Moves only the contact shadow and marker, not the vehicle.",
+        )
         show_shadow_points = st.checkbox("Show tyre-shadow points on preview", value=False, key="shadow_marker_preview")
         extra_enabled = st.checkbox(
             "Add two more tyre contact shadows (optional)", value=False,
@@ -929,6 +961,10 @@ try:
                          cast_strength=cast_strength,
                          cast_horizontal=cast_horizontal,
                          cast_vertical=cast_vertical,
+                         tyre_contact_darkness=tyre_contact_darkness,
+                         tyre_contact_size=tyre_contact_size,
+                         tyre_front_x_nudge=tyre_front_x_nudge,
+                         tyre_rear_x_nudge=tyre_rear_x_nudge,
                          fine_x=fine_x, fine_y=fine_y, fine_scale=fine_scale_pct / 100)
 except ValueError as ex:
     st.error(str(ex))
